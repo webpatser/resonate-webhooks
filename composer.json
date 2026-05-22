@@ -1,0 +1,53 @@
+{
+    "name": "webpatser/resonate-webhooks",
+    "description": "Pusher-style HTTP webhooks for Resonate: channel occupancy and presence events delivered to your backend",
+    "keywords": ["resonate", "websockets", "webhooks", "pusher", "presence", "broadcasting"],
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Christoph Kempen",
+            "email": "christoph@downsized.nl"
+        }
+    ],
+    "require": {
+        "php": "^8.5",
+        "illuminate/contracts": "^13.0",
+        "illuminate/support": "^13.0",
+        "webpatser/fledge-fiber": "^13.4",
+        "webpatser/resonate": "^0.4",
+        "webpatser/resonate-roster": "^0.2"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Webpatser\\ResonateWebhooks\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Webpatser\\ResonateWebhooks\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Webpatser\\ResonateWebhooks\\WebhooksServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "pest"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
