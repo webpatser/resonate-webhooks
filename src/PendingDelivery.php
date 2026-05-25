@@ -32,6 +32,7 @@ final class PendingDelivery
         public readonly string $url,
         public readonly array $headers,
         public readonly string $body,
+        public readonly string $appId,
     ) {
         //
     }

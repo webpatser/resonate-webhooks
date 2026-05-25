@@ -5,6 +5,8 @@ namespace Webpatser\ResonateWebhooks;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 use Webpatser\Resonate\Contracts\ApplicationProvider;
+use Webpatser\ResonateWebhooks\Events\WebhookDelivered;
+use Webpatser\ResonateWebhooks\Events\WebhookDropped;
 
 use function Fledge\Async\async;
 
@@ -140,7 +142,7 @@ class WebhookDispatcher
             'Content-Type' => 'application/json',
             'X-Pusher-Key' => $app->key(),
             'X-Pusher-Signature' => $this->signer->sign($body, $app->secret()),
-        ], $body);
+        ], $body, $appId);
     }
 
     /**
@@ -152,6 +154,8 @@ class WebhookDispatcher
             $status = $this->transport->deliver($delivery->url, $delivery->headers, $delivery->body);
 
             if ($status >= 200 && $status < 300) {
+                WebhookDelivered::dispatch($delivery->url, $status, $delivery->appId, $delivery->attempts + 1);
+
                 $this->forget($delivery);
 
                 return;
@@ -167,6 +171,8 @@ class WebhookDispatcher
 
         if ($delivery->attempts >= $this->maxAttempts) {
             Log::warning("Webhook dropped after {$delivery->attempts} attempts ({$reason}): {$delivery->url}");
+
+            WebhookDropped::dispatch($delivery->url, $delivery->appId, $delivery->attempts, $reason);
 
             $this->forget($delivery);
 

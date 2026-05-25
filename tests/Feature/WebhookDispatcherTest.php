@@ -1,6 +1,9 @@
 <?php
 
+use Illuminate\Support\Facades\Event;
 use Webpatser\Resonate\Contracts\ApplicationProvider;
+use Webpatser\ResonateWebhooks\Events\WebhookDelivered;
+use Webpatser\ResonateWebhooks\Events\WebhookDropped;
 use Webpatser\ResonateWebhooks\Tests\Support\RecordingTransport;
 use Webpatser\ResonateWebhooks\WebhookDispatcher;
 use Webpatser\ResonateWebhooks\WebhookEndpoint;
@@ -108,4 +111,55 @@ it('drops a delivery after the attempt limit', function () {
     });
 
     expect($dispatcher->pendingCount())->toBe(0);
+});
+
+it('dispatches WebhookDelivered on a successful delivery', function () {
+    Event::fake([WebhookDelivered::class, WebhookDropped::class]);
+
+    $dispatcher = makeDispatcher(
+        new RecordingTransport(202),
+        [WebhookEndpoint::fromConfig(['url' => 'http://hook.test'])],
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    Event::assertDispatched(WebhookDelivered::class, function (WebhookDelivered $event) {
+        return $event->url === 'http://hook.test'
+            && $event->status === 202
+            && $event->appId === 'app-id'
+            && $event->attempts === 1;
+    });
+
+    Event::assertNotDispatched(WebhookDropped::class);
+});
+
+it('dispatches WebhookDropped after the attempt limit', function () {
+    Event::fake([WebhookDelivered::class, WebhookDropped::class]);
+
+    $dispatcher = makeDispatcher(
+        new RecordingTransport(500),
+        [WebhookEndpoint::fromConfig(['url' => 'http://hook.test'])],
+        maxAttempts: 1,
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    Event::assertDispatched(WebhookDropped::class, function (WebhookDropped $event) {
+        return $event->url === 'http://hook.test'
+            && $event->appId === 'app-id'
+            && $event->attempts === 1
+            && $event->reason === 'HTTP 500';
+    });
+
+    Event::assertNotDispatched(WebhookDelivered::class);
 });

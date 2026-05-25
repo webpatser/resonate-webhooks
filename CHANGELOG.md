@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-25
+
+### Added
+
+- `Events\WebhookDelivered` and `Events\WebhookDropped`: Laravel events
+  dispatched from `WebhookDispatcher::attempt()` on successful delivery and on
+  give-up after the configured attempt limit. Carries url, status (delivered),
+  reason (dropped), appId, and attempts so a metrics consumer can bucket
+  cleanly. Used by `webpatser/resonate-pulse v0.2` for dashboard cards.
+
+### Changed
+
+- `PendingDelivery` now carries the `appId` of the events it carries, so the
+  events emitted from `attempt()` can label their metric by application.
+  Internal change; no behaviour shift for existing consumers.
+
 ## [0.1.0] - 2026-05-22
 
 Initial release.
@@ -32,5 +48,6 @@ Initial release.
 - `WebhooksServiceProvider`: merges config and binds the `WebhookTransport`
   port; publishes config via `vendor:publish --tag=resonate-webhooks-config`.
 
-[Unreleased]: https://github.com/webpatser/resonate-webhooks/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/webpatser/resonate-webhooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/webpatser/resonate-webhooks/releases/tag/v0.1.0
