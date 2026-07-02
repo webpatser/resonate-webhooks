@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Webpatser\Resonate\Contracts\ApplicationProvider;
 use Webpatser\ResonateWebhooks\Events\WebhookDelivered;
 use Webpatser\ResonateWebhooks\Events\WebhookDropped;
@@ -111,6 +112,29 @@ it('drops a delivery after the attempt limit', function () {
     });
 
     expect($dispatcher->pendingCount())->toBe(0);
+});
+
+it('strips basic-auth credentials from a dropped delivery log line', function () {
+    Log::spy();
+
+    $dispatcher = makeDispatcher(
+        new RecordingTransport(500),
+        [WebhookEndpoint::fromConfig(['url' => 'https://user:secret-pass@hook.test/in?token=abc'])],
+        maxAttempts: 1,
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    Log::shouldHaveReceived('warning')->withArgs(function (string $message) {
+        return str_contains($message, 'https://hook.test/in?token=abc')
+            && ! str_contains($message, 'secret-pass')
+            && ! str_contains($message, 'user:');
+    })->once();
 });
 
 it('dispatches WebhookDelivered on a successful delivery', function () {

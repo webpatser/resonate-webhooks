@@ -170,7 +170,9 @@ class WebhookDispatcher
         $delivery->inFlight = false;
 
         if ($delivery->attempts >= $this->maxAttempts) {
-            Log::warning("Webhook dropped after {$delivery->attempts} attempts ({$reason}): {$delivery->url}");
+            $url = $this->sanitizeUrlForLog($delivery->url);
+
+            Log::warning("Webhook dropped after {$delivery->attempts} attempts ({$reason}): {$url}");
 
             WebhookDropped::dispatch($delivery->url, $delivery->appId, $delivery->attempts, $reason);
 
@@ -181,6 +183,29 @@ class WebhookDispatcher
 
         // Exponential backoff, capped at a minute.
         $delivery->dueAt = microtime(true) + min(60.0, 2 ** $delivery->attempts);
+    }
+
+    /**
+     * Strip any basic-auth userinfo from a URL before it reaches the logs.
+     *
+     * An operator may configure an endpoint as https://user:pass@host/path;
+     * logging it verbatim would leak those credentials. This rebuilds the URL
+     * with only scheme, host, port, path and query, dropping the userinfo.
+     */
+    protected function sanitizeUrlForLog(string $url): string
+    {
+        $parts = parse_url($url);
+
+        if ($parts === false || ! isset($parts['host'])) {
+            return $url;
+        }
+
+        $scheme = isset($parts['scheme']) ? $parts['scheme'].'://' : '';
+        $port = isset($parts['port']) ? ':'.$parts['port'] : '';
+        $path = $parts['path'] ?? '';
+        $query = isset($parts['query']) ? '?'.$parts['query'] : '';
+
+        return $scheme.$parts['host'].$port.$path.$query;
     }
 
     /**
