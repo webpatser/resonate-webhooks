@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-02
+
+### Security
+- Strip basic-auth credentials from webhook URLs before they are written to logs.
+
 ## [0.2.0] - 2026-05-25
 
 ### Added
@@ -49,5 +54,6 @@ Initial release.
   port; publishes config via `vendor:publish --tag=resonate-webhooks-config`.
 
 [Unreleased]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.0...HEAD
+[0.2.1]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/webpatser/resonate-webhooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/webpatser/resonate-webhooks/releases/tag/v0.1.0
