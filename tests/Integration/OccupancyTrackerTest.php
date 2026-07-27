@@ -120,6 +120,36 @@ it('claims member edges once per distinct user', function () {
         ->and($removed)->toBe([true, false]);
 });
 
+it('claims member edges for numeric user ids despite PHP key casting', function () {
+    // Real user ids are numeric ("42"); PHP casts numeric-string array keys
+    // to ints, which used to break the strict in_array() check in
+    // claimMemberAdded() so the member_added edge never fired.
+    $this->redis->hset('roster-test:presence-room:node-a', 'sock-1', '42');
+
+    $users = [];
+    $added = [];
+
+    runLoop(function () use (&$users, &$added) {
+        $users = makeTracker()->users('presence-room');
+        $added[] = makeTracker()->claimMemberAdded('presence-room', '42');
+        $added[] = makeTracker()->claimMemberAdded('presence-room', '42');
+    });
+
+    // The user leaves: the roster no longer lists them.
+    $this->redis->del('roster-test:presence-room:node-a');
+
+    $removed = [];
+
+    runLoop(function () use (&$removed) {
+        $removed[] = makeTracker()->claimMemberRemoved('presence-room', '42');
+        $removed[] = makeTracker()->claimMemberRemoved('presence-room', '42');
+    });
+
+    expect($users)->toBe(['42'])
+        ->and($added)->toBe([true, false])
+        ->and($removed)->toBe([true, false]);
+});
+
 it('reconciles a missed occupied edge against the roster', function () {
     // The roster shows a connection but no occupied flag was ever set.
     $this->redis->hset('roster-test:presence-room:node-a', 'sock-1', 'u-1');

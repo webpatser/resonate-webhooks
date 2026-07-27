@@ -62,7 +62,10 @@ class OccupancyTracker
             }
         }
 
-        return array_keys($users);
+        // PHP silently casts numeric-string array keys ("42") to ints, which
+        // would break the strict in_array() comparisons in the claim methods;
+        // cast back so this is a list<string> as documented.
+        return array_map('strval', array_keys($users));
     }
 
     /**
