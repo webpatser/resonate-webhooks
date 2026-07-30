@@ -15,8 +15,8 @@
         "illuminate/contracts": "^13.0",
         "illuminate/support": "^13.0",
         "webpatser/fledge-fiber": "^13.4",
-        "webpatser/resonate": "^0.4",
-        "webpatser/resonate-roster": "^0.2"
+        "webpatser/resonate": "^0.4|^0.5",
+        "webpatser/resonate-roster": "^0.2.3"
     },
     "require-dev": {
         "larastan/larastan": "^3.10",

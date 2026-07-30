@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-30
+
+### Changed
+
+- Widen the `webpatser/resonate` constraint to `^0.4|^0.5`. Composer treats a
+  `^0.4` caret on a 0.x package as `>=0.4 <0.5`, so this package could not be
+  installed next to a server running Resonate v0.5 even though the suite passes
+  against it. Both major lines are now accepted.
+- Raise the `webpatser/resonate-roster` constraint to `^0.2.3`, the release that
+  carries the matching Resonate v0.5 support.
+
+## [0.2.2] - 2026-07-30
+
 ### Security
 
 - `WebhookPlugin::onMessage()` now applies the same checks the Pusher protocol
