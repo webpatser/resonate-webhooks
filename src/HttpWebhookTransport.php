@@ -31,7 +31,7 @@ final class HttpWebhookTransport implements WebhookTransport
     /**
      * POST a webhook body and return the HTTP status code.
      *
-     * @param  array<string, string>  $headers
+     * @param  array<non-empty-string, string>  $headers
      */
     public function deliver(string $url, array $headers, string $body): int
     {

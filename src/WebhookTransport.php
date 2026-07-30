@@ -16,7 +16,7 @@ interface WebhookTransport
      * Implementations run inside the Resonate event loop, so the call must be
      * fiber-suspending rather than blocking.
      *
-     * @param  array<string, string>  $headers
+     * @param  array<non-empty-string, string>  $headers
      */
     public function deliver(string $url, array $headers, string $body): int;
 }

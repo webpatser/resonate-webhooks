@@ -132,17 +132,17 @@ class OccupancyTracker
         $key = $this->flag('occ', $channel);
         $flagged = $this->redis->has($key);
 
-        if ($occupied && ! $flagged) {
-            return $this->claimFlag($key) ? 'occupied' : null;
-        }
+        if ($occupied) {
+            if (! $flagged) {
+                return $this->claimFlag($key) ? 'occupied' : null;
+            }
 
-        if ($occupied && $flagged) {
             $this->redis->expireIn($key, $this->ttl);
 
             return null;
         }
 
-        if (! $occupied && $flagged) {
+        if ($flagged) {
             return $this->redis->delete($key) > 0 ? 'vacated' : null;
         }
 

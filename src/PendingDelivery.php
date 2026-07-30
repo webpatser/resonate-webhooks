@@ -26,7 +26,7 @@ final class PendingDelivery
     public bool $inFlight = false;
 
     /**
-     * @param  array<string, string>  $headers
+     * @param  array<non-empty-string, string>  $headers
      */
     public function __construct(
         public readonly string $url,

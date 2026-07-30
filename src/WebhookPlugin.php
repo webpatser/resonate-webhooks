@@ -86,10 +86,10 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             app(WebhookTransport::class),
             new WebhookSigner,
             app(ApplicationProvider::class),
-            array_map(
+            array_values(array_map(
                 fn (array $endpoint) => WebhookEndpoint::fromConfig($endpoint),
                 $config['endpoints'] ?? [],
-            ),
+            )),
             (int) ($config['max_attempts'] ?? 5),
         );
     }
@@ -125,11 +125,11 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         $connection->setState('webhooks.channels', $subscriptions);
 
         if ($this->occupancy->claimOccupied($name)) {
-            $this->dispatcher->record(WebhookEvent::channelOccupied($appId, $name));
+            $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
         }
 
         if ($userId !== '' && $this->occupancy->claimMemberAdded($name, $userId)) {
-            $this->dispatcher->record(WebhookEvent::memberAdded($appId, $name, $userId));
+            $this->dispatcher?->record(WebhookEvent::memberAdded($appId, $name, $userId));
         }
     }
 
@@ -183,7 +183,7 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
                 $from->app()->id(),
                 $channel,
                 $name,
-                $data === null ? null : (is_string($data) ? $data : json_encode($data)),
+                $this->encodePayload($data),
                 $from->id(),
                 $this->presenceUserIdOn($from, $channel),
             ));
@@ -221,11 +221,11 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         }
 
         if ($userId !== '' && $this->occupancy->claimMemberRemoved($channel, $userId)) {
-            $this->dispatcher->record(WebhookEvent::memberRemoved($appId, $channel, $userId));
+            $this->dispatcher?->record(WebhookEvent::memberRemoved($appId, $channel, $userId));
         }
 
         if ($this->occupancy->claimVacated($channel)) {
-            $this->dispatcher->record(WebhookEvent::channelVacated($appId, $channel));
+            $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $channel));
             unset($this->tracked[$channel]);
         }
     }
@@ -246,15 +246,32 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             $edge = $this->occupancy->reconcileOccupancy($name);
 
             if ($edge === 'occupied') {
-                $this->dispatcher->record(WebhookEvent::channelOccupied($appId, $name));
+                $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
             } elseif ($edge === 'vacated') {
-                $this->dispatcher->record(WebhookEvent::channelVacated($appId, $name));
+                $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $name));
             }
 
             if ($this->context->connectionsOn($appId, $name) === []) {
                 unset($this->tracked[$name]);
             }
         }
+    }
+
+    /**
+     * Render a whisper's data payload as the wire string, or null.
+     *
+     * A value that cannot be encoded is carried as null rather than as the
+     * `false` json_encode() hands back on failure.
+     */
+    protected function encodePayload(mixed $data): ?string
+    {
+        if ($data === null || is_string($data)) {
+            return $data;
+        }
+
+        $encoded = json_encode($data);
+
+        return $encoded === false ? null : $encoded;
     }
 
     /**
