@@ -19,8 +19,11 @@
         "webpatser/resonate-roster": "^0.2"
     },
     "require-dev": {
+        "larastan/larastan": "^3.10",
+        "laravel/pint": "^1.30",
         "orchestra/testbench": "^10.0|^11.0",
-        "pestphp/pest": "^4.0"
+        "pestphp/pest": "^4.0",
+        "phpstan/phpstan": "^2.2"
     },
     "autoload": {
         "psr-4": {
@@ -40,6 +43,8 @@
         }
     },
     "scripts": {
+        "analyse": "phpstan analyse",
+        "lint": "pint --test",
         "test": "pest"
     },
     "config": {
