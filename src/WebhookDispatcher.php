@@ -81,9 +81,12 @@ class WebhookDispatcher
             $delivery->inFlight = true;
 
             // Fire-and-forget: the delivery runs in its own fiber so a slow
-            // endpoint never stalls the loop. Failures are captured by
-            // attempt() itself, so the Future is intentionally discarded.
-            (void) async(fn () => $this->attempt($delivery));
+            // endpoint never stalls the loop. attempt() swallows every
+            // Throwable itself, and ->ignore() marks the Future as
+            // deliberately discarded (fledge's own convention, see
+            // RedisSubscriber), so a rejection can never reach the event loop
+            // as an UnhandledFutureError and stop the server.
+            async(fn () => $this->attempt($delivery))->ignore();
         }
     }
 
@@ -146,26 +149,67 @@ class WebhookDispatcher
     }
 
     /**
-     * Attempt one delivery, retrying with backoff or dropping on exhaustion.
+     * Run one delivery attempt, letting nothing escape the fiber.
+     *
+     * This is the whole body of the discarded fiber started by drain(). Every
+     * Throwable has to die here: the events dispatched below reach host
+     * listeners this package does not control, and a listener that throws
+     * would reject an unobserved Future, which surfaces as an
+     * UnhandledFutureError out of EventLoop::run() and takes the entire
+     * WebSocket server down over one bad webhook endpoint.
      */
     protected function attempt(PendingDelivery $delivery): void
     {
         try {
-            $status = $this->transport->deliver($delivery->url, $delivery->headers, $delivery->body);
-
-            if ($status >= 200 && $status < 300) {
-                WebhookDelivered::dispatch($delivery->url, $status, $delivery->appId, $delivery->attempts + 1);
-
-                $this->forget($delivery);
-
-                return;
-            }
-
-            $reason = 'HTTP '.$status;
+            $this->send($delivery);
         } catch (Throwable $e) {
-            $reason = $e->getMessage();
+            // The delivery is released rather than left in flight, so a later
+            // drain can still pick it up if it was never resolved.
+            $delivery->inFlight = false;
+
+            try {
+                Log::warning('Webhook delivery attempt aborted: '.$e->getMessage());
+            } catch (Throwable) {
+                // The logger is host code too. If it throws there is nowhere
+                // left to report to, and the fiber must still end quietly.
+            }
+        }
+    }
+
+    /**
+     * Send one delivery, retrying with backoff or dropping on exhaustion.
+     */
+    protected function send(PendingDelivery $delivery): void
+    {
+        try {
+            $status = $this->transport->deliver($delivery->url, $delivery->headers, $delivery->body);
+        } catch (Throwable $e) {
+            $this->fail($delivery, $e->getMessage());
+
+            return;
         }
 
+        if ($status < 200 || $status >= 300) {
+            $this->fail($delivery, 'HTTP '.$status);
+
+            return;
+        }
+
+        // Success bookkeeping sits outside the transport try/catch, and the
+        // delivery is forgotten before the event fires. A throwing
+        // WebhookDelivered listener must never be read as a delivery failure:
+        // that would retry a webhook the endpoint already accepted, posting
+        // the identical signed payload a second time.
+        $this->forget($delivery);
+
+        WebhookDelivered::dispatch($delivery->url, $status, $delivery->appId, $delivery->attempts + 1);
+    }
+
+    /**
+     * Record a failed attempt: schedule a retry, or drop once exhausted.
+     */
+    protected function fail(PendingDelivery $delivery, string $reason): void
+    {
         $delivery->attempts++;
         $delivery->inFlight = false;
 
@@ -174,9 +218,11 @@ class WebhookDispatcher
 
             Log::warning("Webhook dropped after {$delivery->attempts} attempts ({$reason}): {$url}");
 
-            WebhookDropped::dispatch($delivery->url, $delivery->appId, $delivery->attempts, $reason);
-
+            // Forgotten before the event fires, for the same reason as above:
+            // a throwing listener must not leave the delivery pending.
             $this->forget($delivery);
+
+            WebhookDropped::dispatch($delivery->url, $delivery->appId, $delivery->attempts, $reason);
 
             return;
         }

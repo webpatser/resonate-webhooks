@@ -1,6 +1,7 @@
 <?php
 
 use Predis\Client;
+use Webpatser\Resonate\Application;
 use Webpatser\Resonate\Contracts\ApplicationProvider;
 use Webpatser\Resonate\Plugins\PluginContext;
 use Webpatser\Resonate\Protocols\Pusher\Contracts\ChannelManager;
@@ -49,6 +50,17 @@ function joinPresenceChannel(string $channelName, FakeConnection $connection, st
 
     $channel = app(ChannelManager::class)->for($app)->findOrCreate($channelName);
     $channel->subscribe($connection, presenceAuth($connection->id(), $channelName, $data), $data);
+
+    return $channel;
+}
+
+/**
+ * Subscribe a fake connection to a public channel.
+ */
+function joinPublicChannel(string $channelName, FakeConnection $connection): object
+{
+    $channel = app(ChannelManager::class)->for($connection->app())->findOrCreate($channelName);
+    $channel->subscribe($connection);
 
     return $channel;
 }
@@ -175,4 +187,115 @@ it('emits a client_event for a client whisper', function () {
         ->and($clientEvent['event'])->toBe('client-typing')
         ->and($clientEvent['socket_id'])->toBe('sock-1')
         ->and($clientEvent['user_id'])->toBe('u-1');
+});
+
+it('does not emit a client_event when the sender never joined the channel', function () {
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-room-'.uniqid();
+
+    // One legitimate member holds the channel open, and an unrelated socket
+    // whispers on it without ever having subscribed.
+    joinPresenceChannel($channelName, new FakeConnection('sock-1', $app), 'u-1');
+
+    $outsider = new FakeConnection('sock-2', $app);
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($webhooks, $context, $outsider, $channelName) {
+        $webhooks->boot($context);
+
+        $webhooks->onMessage($outsider, [
+            'event' => 'client-typing',
+            'channel' => $channelName,
+            'data' => ['typing' => true],
+        ]);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    expect($this->transport->deliveries)->toBeEmpty();
+});
+
+it('does not emit a client_event on a public channel', function () {
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'room-'.uniqid();
+
+    $connection = new FakeConnection('sock-1', $app);
+    joinPublicChannel($channelName, $connection);
+
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($webhooks, $context, $connection, $channelName) {
+        $webhooks->boot($context);
+
+        $webhooks->onMessage($connection, [
+            'event' => 'client-typing',
+            'channel' => $channelName,
+            'data' => ['typing' => true],
+        ]);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    expect($this->transport->deliveries)->toBeEmpty();
+});
+
+it('does not emit a client_event when client messaging is disabled for the app', function () {
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-room-'.uniqid();
+
+    $app = new Application(
+        'app-id', 'app-key', 'app-secret', 60, 30, ['*'], 10_000, null, 'never',
+    );
+
+    $connection = new FakeConnection('sock-1', $app);
+    joinPresenceChannel($channelName, $connection, 'u-1');
+
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($webhooks, $context, $connection, $channelName) {
+        $webhooks->boot($context);
+
+        $webhooks->onMessage($connection, [
+            'event' => 'client-typing',
+            'channel' => $channelName,
+            'data' => ['typing' => true],
+        ]);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    expect($this->transport->deliveries)->toBeEmpty();
+});
+
+it('does not emit a client_event for a whisper the protocol validator rejects', function () {
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-room-'.uniqid();
+
+    $connection = new FakeConnection('sock-1', $app);
+    joinPresenceChannel($channelName, $connection, 'u-1');
+
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($webhooks, $context, $connection, $channelName) {
+        $webhooks->boot($context);
+
+        // `data` must be an array or absent; a scalar payload never reaches
+        // the whisper path.
+        $webhooks->onMessage($connection, [
+            'event' => 'client-typing',
+            'channel' => $channelName,
+            'data' => 'not-an-array',
+        ]);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    expect($this->transport->deliveries)->toBeEmpty();
 });

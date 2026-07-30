@@ -166,28 +166,61 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     /**
      * Emit a `client_event` webhook for a `client-*` whisper; relay all else.
      *
+     * Interceptors run before the Pusher protocol layer validates the frame,
+     * so this hook re-applies every check `ClientEvent::handle()` makes before
+     * it relays a whisper. Without them an unsubscribed socket could whisper
+     * any channel name it liked, be rejected by the server with pusher error
+     * 4009, and still have a correctly signed `client_event` posted to the
+     * backend attesting to activity on a channel it never joined.
+     *
      * @param  array{event?:mixed,channel?:mixed,data?:mixed}  $event
      */
     public function onMessage(Connection $from, array $event): MessageDisposition
     {
         $name = $event['event'] ?? null;
         $channel = $event['channel'] ?? null;
+        $data = $event['data'] ?? null;
 
-        if ($this->dispatcher !== null
-            && is_string($name)
-            && is_string($channel)
-            && str_starts_with($name, 'client-')) {
-            $data = $event['data'] ?? null;
-
-            $this->dispatcher->record(WebhookEvent::clientEvent(
-                $from->app()->id(),
-                $channel,
-                $name,
-                $this->encodePayload($data),
-                $from->id(),
-                $this->presenceUserIdOn($from, $channel),
-            ));
+        if ($this->dispatcher === null
+            || ! is_string($name)
+            || ! is_string($channel)
+            || ! str_starts_with($name, 'client-')) {
+            return MessageDisposition::Relay;
         }
+
+        // The frame shape the protocol validator accepts: a whisper payload is
+        // an array or absent, never a scalar.
+        if ($data !== null && ! is_array($data)) {
+            return MessageDisposition::Relay;
+        }
+
+        // Client messaging has to be enabled for the application.
+        if (! in_array($from->app()->acceptClientEventsFrom(), ['all', 'members'], strict: true)) {
+            return MessageDisposition::Relay;
+        }
+
+        // Whispers are only permitted on private and presence channels.
+        if (! str_starts_with($channel, 'private-') && ! str_starts_with($channel, 'presence-')) {
+            return MessageDisposition::Relay;
+        }
+
+        // And the sender has to be a member of the channel it whispers on.
+        $member = $this->context->connectionsOn($from->app(), $channel)[$from->id()] ?? null;
+
+        if ($member === null) {
+            return MessageDisposition::Relay;
+        }
+
+        $userId = $member->data('user_id');
+
+        $this->dispatcher->record(WebhookEvent::clientEvent(
+            $from->app()->id(),
+            $channel,
+            $name,
+            $this->encodePayload($data),
+            $from->id(),
+            $userId === null ? null : (string) $userId,
+        ));
 
         return MessageDisposition::Relay;
     }
@@ -282,18 +315,6 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         $member = $channel->connections()[$connection->id()] ?? null;
 
         return (string) ($member?->data('user_id') ?? '');
-    }
-
-    /**
-     * The presence user id for a connection on a named channel.
-     */
-    protected function presenceUserIdOn(Connection $connection, string $channel): ?string
-    {
-        $member = $this->context->connectionsOn($connection->app(), $channel)[$connection->id()] ?? null;
-
-        $userId = $member?->data('user_id');
-
-        return $userId === null ? null : (string) $userId;
     }
 
     /**

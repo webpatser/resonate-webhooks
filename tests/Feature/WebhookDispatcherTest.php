@@ -187,3 +187,73 @@ it('dispatches WebhookDropped after the attempt limit', function () {
 
     Event::assertNotDispatched(WebhookDelivered::class);
 });
+
+it('contains a throwing WebhookDropped listener inside the delivery fiber', function () {
+    Event::listen(WebhookDropped::class, function () {
+        throw new RuntimeException('listener exploded');
+    });
+
+    $dispatcher = makeDispatcher(
+        new RecordingTransport(500),
+        [WebhookEndpoint::fromConfig(['url' => 'http://hook.test'])],
+        maxAttempts: 1,
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    // The delivery fiber is deliberately discarded, so anything escaping it
+    // would surface as an UnhandledFutureError out of EventLoop::run() and
+    // take the whole server down. Reaching the assertion is the assertion.
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    expect($dispatcher->pendingCount())->toBe(0);
+});
+
+it('contains a throwing WebhookDelivered listener inside the delivery fiber', function () {
+    Event::listen(WebhookDelivered::class, function () {
+        throw new RuntimeException('listener exploded');
+    });
+
+    $dispatcher = makeDispatcher(
+        new RecordingTransport(200),
+        [WebhookEndpoint::fromConfig(['url' => 'http://hook.test'])],
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    expect($dispatcher->pendingCount())->toBe(0);
+});
+
+it('does not retry a delivered webhook when its listener throws', function () {
+    Event::listen(WebhookDelivered::class, function () {
+        throw new RuntimeException('listener exploded');
+    });
+
+    $dispatcher = makeDispatcher(
+        $transport = new RecordingTransport(200),
+        [WebhookEndpoint::fromConfig(['url' => 'http://hook.test'])],
+    );
+
+    $dispatcher->record(WebhookEvent::channelOccupied('app-id', 'presence-room'));
+
+    runLoop(function () use ($dispatcher) {
+        $dispatcher->drain();
+        delay(0.1);
+
+        // A second drain would resend the identical signed payload if the
+        // throwing listener had been read as a delivery failure.
+        $dispatcher->drain();
+        delay(0.1);
+    });
+
+    expect($dispatcher->pendingCount())->toBe(0)
+        ->and($transport->deliveries)->toHaveCount(1);
+});

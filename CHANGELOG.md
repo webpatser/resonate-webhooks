@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `WebhookPlugin::onMessage()` now applies the same checks the Pusher protocol
+  applies before it relays a whisper: client messaging must be enabled for the
+  application, the channel must be `private-` or `presence-`, and the sender
+  must be a member of that channel. Message interceptors run before the
+  protocol layer validates the frame, so any socket could previously whisper
+  `client-anything` on any channel string, be rejected by the server with
+  pusher error 4009, and still have a correctly HMAC-signed `client_event`
+  posted to the backend attesting to activity on a channel it never joined.
+  A whisper carrying a non-array `data` payload is also no longer recorded,
+  since the protocol validator rejects it.
+
+### Fixed
+
+- `WebhookDispatcher` no longer lets a throwing host listener stop the server.
+  The delivery attempt runs in a deliberately discarded fiber, and the
+  `WebhookDropped` dispatch and backoff bookkeeping sat outside the `try`, so
+  a listener that threw rejected an unobserved Future; with no error handler
+  installed that surfaces as an `UnhandledFutureError` out of
+  `EventLoop::run()` and terminates the whole WebSocket server because one
+  webhook endpoint was down. The attempt body is now fully guarded and the
+  Future is marked `->ignore()`.
+- A successful webhook is no longer retried when a `WebhookDelivered` listener
+  throws. The success bookkeeping (forget, then dispatch) has moved out of the
+  failure `try`, so a throwing listener can no longer be read as a delivery
+  failure and re-post the identical signed payload to an endpoint that already
+  accepted it.
+
 ## [0.2.1] - 2026-07-02
 
 ### Security
