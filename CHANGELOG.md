@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Occupancy is now tracked per application. Roster keys carry the application
+  id from `webpatser/resonate-roster` 0.3.0 on, and the edge flags follow:
+  `{prefix}:{kind}:{appId}:{channel}` instead of `{prefix}:{kind}:{channel}`.
+  Two applications configured in one Resonate process that both serve a channel
+  of the same name shared one occupancy state, so the second application to
+  fill up found the flag already claimed and never got its `channel_occupied`,
+  while the first one emptying fired a `channel_vacated` for a channel that was
+  still occupied on the other application.
+- `WebhookPlugin` no longer re-types the roster's default key prefix as a
+  literal (`config('resonate-roster.key_prefix', 'roster')`). It builds the
+  schema with `RosterKeys::fromConfig(config('resonate-roster'))`, so the
+  prefix and the legacy fallback window come from the roster's own config and
+  cannot drift from its defaults.
+
+### Changed
+
+- `OccupancyTracker`'s methods take the application id as their first argument:
+  `connectionCount($appId, $channel)`, `users()`, `claimOccupied()`,
+  `claimVacated()`, `claimMemberAdded($appId, $channel, $userId)`,
+  `claimMemberRemoved()`, and `reconcileOccupancy()`. It is an internal
+  collaborator of the plugin; host code that built one directly needs updating.
+- `WebhookPlugin` tracks channels as application id => channel name, so two
+  applications serving the same channel name are reconciled separately.
+- The `webpatser/resonate-roster` constraint is now `^0.3.0`, the release that
+  carries the app-scoped key schema. Upgrade both together.
+
+### Upgrading
+
+Deploy this alongside `webpatser/resonate-roster` 0.3.x and follow that
+package's upgrade procedure; it owns the key-schema migration. While the
+roster's `legacy_fallback` window is open this plugin reads pre-0.3.0 roster
+keys per node as well, so a rolling deploy never reads a busy channel as empty
+and never fires a spurious `channel_vacated`. A pre-upgrade occupied flag is
+treated as an edge already claimed, so channels that were occupied before the
+upgrade are not re-announced as `channel_occupied`; the old flag then expires
+on its own TTL.
+
 ## [0.2.3] - 2026-07-30
 
 ### Changed
@@ -95,7 +134,7 @@ Initial release.
 - `WebhooksServiceProvider`: merges config and binds the `WebhookTransport`
   port; publishes config via `vendor:publish --tag=resonate-webhooks-config`.
 
-[Unreleased]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.3...HEAD
 [0.2.1]: https://github.com/webpatser/resonate-webhooks/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/webpatser/resonate-webhooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/webpatser/resonate-webhooks/releases/tag/v0.1.0

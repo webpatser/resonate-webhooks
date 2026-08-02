@@ -100,6 +100,7 @@ class TestCase extends Testbench
         $app['config']->set('resonate-roster', [
             'connection' => $redis,
             'key_prefix' => 'roster-test',
+            'legacy_fallback' => true,
             'ttl' => 90,
             'heartbeat_interval' => 30,
             'track' => 'all',

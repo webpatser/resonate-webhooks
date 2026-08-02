@@ -19,12 +19,14 @@ This package fixes both by reading occupancy from [webpatser/resonate-roster](ht
 
 The roster answers "how many connections does channel C have" and "which users are in C", cluster-wide. A webhook is an *edge*: the transition into or out of those states. The plugin derives edges like this:
 
-- On a subscribe, it reads the cluster connection count from the roster. The transition into the first connection is claimed with an atomic Redis flag (`SET NX`); the one node that wins the flag emits `channel_occupied`.
+- On a subscribe, it reads the cluster connection count from the roster, for that connection's own application. The transition into the first connection is claimed with an atomic Redis flag (`SET NX`); the one node that wins the flag emits `channel_occupied`.
 - On an unsubscribe or close that leaves the cluster count at zero, one node wins the flag delete and emits `channel_vacated`.
 - `member_added` and `member_removed` use the same claim, keyed per user, driven by whether the user still appears in the roster.
 - A reconcile tick re-checks every tracked channel against the roster, so an edge missed during a crash is recovered and flag TTLs are refreshed.
 
 Because the flag is the arbiter, each edge fires exactly once per cluster even when several nodes see the transition at the same instant.
+
+Every read and every flag is scoped to one application, so two applications that both serve a `presence-lobby` get their own edges: the second one to fill up still emits its own `channel_occupied`, and the first one emptying does not vacate the second.
 
 ### Delivery, off the connection path
 
@@ -130,7 +132,7 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `connection` | `REDIS_*` env | Redis server. Must be the same server and database as resonate-roster. |
-| `key_prefix` | `wh` | Namespace for the edge-detection flag keys. |
+| `key_prefix` | `wh` | Namespace for the edge-detection flag keys, which are `{prefix}:{kind}:{appId}:{channel}`. |
 | `ttl` | `90` | Flag-key TTL in seconds, so a dead node's flag self-heals. |
 | `flush_interval` | `1.0` | Seconds between delivery ticks; events in that window are coalesced. |
 | `reconcile_interval` | `30.0` | Seconds between occupancy reconcile ticks. |
@@ -143,12 +145,14 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 - **Roster `track` must be `all`.** In the default `presence` mode the roster does not mirror public or private channels, so `channel_occupied`/`channel_vacated` would not fire for them.
 - **In-process delivery.** Retries are bounded; a webhook is lost if the server crashes before delivery. The roster remains queryable as the source of truth.
 - **Exactly-once per cluster.** Edges are claimed atomically, so a scaled deployment does not double-send.
+- **Per application.** Occupancy is read and claimed per application, so a channel name shared by two applications produces two independent sets of edges.
+- **Upgrade with the roster.** This version reads the roster's app-scoped keys (roster 0.3+) and honours its `legacy_fallback` window, so deploy both together and follow the roster's upgrade procedure. While that window is open, a channel that was occupied before the upgrade is not re-announced as `channel_occupied`.
 
 ## Requirements
 
 - PHP 8.5+
 - Resonate 0.4+
-- `webpatser/resonate-roster` 0.2+, configured with `track => all`
+- `webpatser/resonate-roster` 0.3+, configured with `track => all`
 - A Redis server reachable from the Resonate process
 
 ## Testing

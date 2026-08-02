@@ -25,6 +25,10 @@ use function Fledge\Async\Redis\createRedisClient;
  * turns a `client-*` whisper into a `client_event`. Emitted events go to a
  * {@see WebhookDispatcher}, which delivers them off the connection path.
  *
+ * Occupancy is tracked per application, so two applications that both serve a
+ * "presence-lobby" each get their own `channel_occupied` and `channel_vacated`
+ * edges rather than sharing one.
+ *
  * Register `Webpatser\ResonateRoster\RedisRosterPlugin` *before* this plugin
  * in `config/reverb.php`: hooks run in array order within one fiber, so the
  * roster's Redis writes must land before this plugin reads the cluster count.
@@ -57,9 +61,13 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     protected float $reconcileInterval;
 
     /**
-     * Presence channels seen on this node: channel name => application id.
+     * Channels seen on this node: application id => channel name => true.
      *
-     * @var array<string, string>
+     * Keyed by application first, so two applications serving a channel of the
+     * same name are reconciled separately instead of one overwriting the
+     * other's entry.
+     *
+     * @var array<string, array<string, true>>
      */
     protected array $tracked = [];
 
@@ -77,7 +85,10 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
 
         $this->occupancy = new OccupancyTracker(
             createRedisClient($this->makeConfig($config['connection'] ?? [])),
-            new RosterKeys(config('resonate-roster.key_prefix', 'roster')),
+            // Built from the roster's own config, so the key prefix and the
+            // legacy fallback window are read from one place instead of being
+            // re-typed here and silently drifting from the roster's defaults.
+            RosterKeys::fromConfig(config('resonate-roster', [])),
             $config['key_prefix'] ?? 'wh',
             (int) ($config['ttl'] ?? 90),
         );
@@ -115,20 +126,21 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         $name = $channel->name();
         $userId = $this->presenceUserId($connection, $channel);
 
-        $this->tracked[$name] = $appId;
+        $this->tracked[$appId][$name] = true;
 
         // Record the channel (and its presence user) on the connection: onClose
         // fires after the connection has left every channel, so this is the
-        // only place a close can recover what to emit departures for.
+        // only place a close can recover what to emit departures for. The
+        // application comes off the connection, so it needs no bookkeeping.
         $subscriptions = $connection->state('webhooks.channels', []);
         $subscriptions[$name] = $userId;
         $connection->setState('webhooks.channels', $subscriptions);
 
-        if ($this->occupancy->claimOccupied($name)) {
+        if ($this->occupancy->claimOccupied($appId, $name)) {
             $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
         }
 
-        if ($userId !== '' && $this->occupancy->claimMemberAdded($name, $userId)) {
+        if ($userId !== '' && $this->occupancy->claimMemberAdded($appId, $name, $userId)) {
             $this->dispatcher?->record(WebhookEvent::memberAdded($appId, $name, $userId));
         }
     }
@@ -253,13 +265,13 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             return;
         }
 
-        if ($userId !== '' && $this->occupancy->claimMemberRemoved($channel, $userId)) {
+        if ($userId !== '' && $this->occupancy->claimMemberRemoved($appId, $channel, $userId)) {
             $this->dispatcher?->record(WebhookEvent::memberRemoved($appId, $channel, $userId));
         }
 
-        if ($this->occupancy->claimVacated($channel)) {
+        if ($this->occupancy->claimVacated($appId, $channel)) {
             $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $channel));
-            unset($this->tracked[$channel]);
+            $this->forget($appId, $channel);
         }
     }
 
@@ -275,18 +287,45 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             return;
         }
 
-        foreach ($this->tracked as $name => $appId) {
-            $edge = $this->occupancy->reconcileOccupancy($name);
+        foreach ($this->tracked as $appId => $channels) {
+            // PHP coerces numeric-string array keys to int, and application
+            // ids are usually numeric, so both segments are cast back before
+            // they are used.
+            $appId = (string) $appId;
 
-            if ($edge === 'occupied') {
-                $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
-            } elseif ($edge === 'vacated') {
-                $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $name));
+            foreach (array_keys($channels) as $channel) {
+                $this->reconcileChannel($appId, (string) $channel);
             }
+        }
+    }
 
-            if ($this->context->connectionsOn($appId, $name) === []) {
-                unset($this->tracked[$name]);
-            }
+    /**
+     * Reconcile one application's channel against the roster.
+     */
+    protected function reconcileChannel(string $appId, string $name): void
+    {
+        $edge = $this->occupancy?->reconcileOccupancy($appId, $name);
+
+        if ($edge === 'occupied') {
+            $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
+        } elseif ($edge === 'vacated') {
+            $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $name));
+        }
+
+        if ($this->context->connectionsOn($appId, $name) === []) {
+            $this->forget($appId, $name);
+        }
+    }
+
+    /**
+     * Drop a channel this node no longer serves, and its application with it.
+     */
+    protected function forget(string $appId, string $name): void
+    {
+        unset($this->tracked[$appId][$name]);
+
+        if (($this->tracked[$appId] ?? []) === []) {
+            unset($this->tracked[$appId]);
         }
     }
 

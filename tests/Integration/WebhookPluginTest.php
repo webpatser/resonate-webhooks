@@ -42,14 +42,17 @@ afterEach(function () {
 
 /**
  * Subscribe a fake connection to a presence channel with a valid auth token.
+ *
+ * The channel is resolved for the connection's own application, so the same
+ * channel name on two applications gives two distinct channels.
  */
 function joinPresenceChannel(string $channelName, FakeConnection $connection, string $userId): object
 {
-    $app = app(ApplicationProvider::class)->findById('app-id');
+    $app = $connection->app();
     $data = json_encode(['user_id' => $userId]);
 
     $channel = app(ChannelManager::class)->for($app)->findOrCreate($channelName);
-    $channel->subscribe($connection, presenceAuth($connection->id(), $channelName, $data), $data);
+    $channel->subscribe($connection, presenceAuth($connection->id(), $channelName, $data, $app->secret()), $data);
 
     return $channel;
 }
@@ -75,6 +78,31 @@ function deliveredEventNames(RecordingTransport $transport): array
     $names = [];
 
     foreach ($transport->deliveries as $delivery) {
+        foreach (json_decode($delivery['body'], associative: true)['events'] as $event) {
+            $names[] = $event['name'];
+        }
+    }
+
+    return $names;
+}
+
+/**
+ * The event names delivered for one application, keyed by its Pusher key.
+ *
+ * Deliveries are built and signed per application, so the X-Pusher-Key header
+ * is what says which application an event batch belongs to.
+ *
+ * @return list<string>
+ */
+function deliveredEventNamesForKey(RecordingTransport $transport, string $pusherKey): array
+{
+    $names = [];
+
+    foreach ($transport->deliveries as $delivery) {
+        if (($delivery['headers']['X-Pusher-Key'] ?? null) !== $pusherKey) {
+            continue;
+        }
+
         foreach (json_decode($delivery['body'], associative: true)['events'] as $event) {
             $names[] = $event['name'];
         }
@@ -298,4 +326,124 @@ it('does not emit a client_event for a whisper the protocol validator rejects', 
     });
 
     expect($this->transport->deliveries)->toBeEmpty();
+});
+
+it('emits an occupancy edge per application on a same-named channel', function () {
+    withSecondApplication();
+
+    $provider = app(ApplicationProvider::class);
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-lobby-'.uniqid();
+
+    $alice = new FakeConnection('sock-alice', $provider->findById('app-id'));
+    $bob = new FakeConnection('sock-bob', $provider->findById('app-two'));
+
+    $lobbyOne = joinPresenceChannel($channelName, $alice, 'u-alice');
+    $lobbyTwo = joinPresenceChannel($channelName, $bob, 'u-bob');
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($roster, $webhooks, $context, $lobbyOne, $lobbyTwo, $alice, $bob) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        $roster->onSubscribe($alice, $lobbyOne);
+        $webhooks->onSubscribe($alice, $lobbyOne);
+
+        $roster->onSubscribe($bob, $lobbyTwo);
+        $webhooks->onSubscribe($bob, $lobbyTwo);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    // The second application shares the channel name, which used to mean it
+    // found the first application's occupied flag already claimed and never
+    // announced its own channel as occupied.
+    expect(deliveredEventNamesForKey($this->transport, 'app-key'))
+        ->toContain('channel_occupied')
+        ->toContain('member_added')
+        ->and(deliveredEventNamesForKey($this->transport, 'app-two-key'))
+        ->toContain('channel_occupied')
+        ->toContain('member_added');
+});
+
+it('does not suppress the second application channel_occupied when the first joined first', function () {
+    withSecondApplication();
+
+    $provider = app(ApplicationProvider::class);
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-lobby-'.uniqid();
+
+    $alice = new FakeConnection('sock-alice', $provider->findById('app-id'));
+    $bob = new FakeConnection('sock-bob', $provider->findById('app-two'));
+
+    $lobbyOne = joinPresenceChannel($channelName, $alice, 'u-alice');
+    $lobbyTwo = joinPresenceChannel($channelName, $bob, 'u-bob');
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($roster, $webhooks, $context, $lobbyOne, $lobbyTwo, $alice, $bob) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        // The first application occupies the channel and its batch is
+        // delivered before the second application joins at all.
+        $roster->onSubscribe($alice, $lobbyOne);
+        $webhooks->onSubscribe($alice, $lobbyOne);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+
+        $roster->onSubscribe($bob, $lobbyTwo);
+        $webhooks->onSubscribe($bob, $lobbyTwo);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+    });
+
+    expect(deliveredEventNamesForKey($this->transport, 'app-key'))->toBe(['channel_occupied', 'member_added'])
+        ->and(deliveredEventNamesForKey($this->transport, 'app-two-key'))->toBe(['channel_occupied', 'member_added']);
+});
+
+it('vacates one application without vacating the other', function () {
+    withSecondApplication();
+
+    $provider = app(ApplicationProvider::class);
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-lobby-'.uniqid();
+
+    $alice = new FakeConnection('sock-alice', $provider->findById('app-id'));
+    $bob = new FakeConnection('sock-bob', $provider->findById('app-two'));
+
+    $lobbyOne = joinPresenceChannel($channelName, $alice, 'u-alice');
+    $lobbyTwo = joinPresenceChannel($channelName, $bob, 'u-bob');
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($roster, $webhooks, $context, $lobbyOne, $lobbyTwo, $alice, $bob) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        $roster->onSubscribe($alice, $lobbyOne);
+        $webhooks->onSubscribe($alice, $lobbyOne);
+        $roster->onSubscribe($bob, $lobbyTwo);
+        $webhooks->onSubscribe($bob, $lobbyTwo);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+
+        // Only the first application's connection drops.
+        $lobbyOne->unsubscribe($alice);
+        $roster->onClose($alice);
+        $webhooks->onClose($alice);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+    });
+
+    expect(deliveredEventNamesForKey($this->transport, 'app-key'))
+        ->toContain('channel_vacated')
+        ->toContain('member_removed')
+        ->and(deliveredEventNamesForKey($this->transport, 'app-two-key'))
+        ->not->toContain('channel_vacated');
 });
