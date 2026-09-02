@@ -136,6 +136,7 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 | `ttl` | `90` | Flag-key TTL in seconds, so a dead node's flag self-heals. |
 | `flush_interval` | `1.0` | Seconds between delivery ticks; events in that window are coalesced. |
 | `reconcile_interval` | `30.0` | Seconds between occupancy reconcile ticks. |
+| `ignore_channel_prefixes` | `['#']` | Channel prefixes never reported on. The protocol reserves `#` for channels the server owns, such as the `#server-to-user-{id}` channels `webpatser/resonate-users` creates, which are a user's session rather than a room. |
 | `max_attempts` | `5` | Delivery attempts before a webhook is dropped. |
 | `endpoints` | `[]` | The endpoints that receive webhooks. |
 

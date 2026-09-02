@@ -71,6 +71,27 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Ignored channel prefixes
+    |--------------------------------------------------------------------------
+    |
+    | Channels whose name starts with one of these are never reported on: no
+    | occupancy edges, no reconcile work, nothing delivered to an endpoint.
+    |
+    | The Pusher protocol reserves "#" for channels the server owns rather than
+    | the application. webpatser/resonate-users subscribes a signed-in
+    | connection to "#server-to-user-{id}" so a message can be addressed to a
+    | person rather than a room, and that channel is a user's session: without
+    | this, every tab opened would post a `channel_occupied` and every tab
+    | closed a `channel_vacated` to backends expecting real channels.
+    |
+    | Set it to an empty array to report on everything.
+    |
+    */
+
+    'ignore_channel_prefixes' => ['#'],
+
     'endpoints' => [
         // [
         //     'url' => env('RESONATE_WEBHOOK_URL'),

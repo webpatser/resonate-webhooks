@@ -447,3 +447,77 @@ it('vacates one application without vacating the other', function () {
         ->and(deliveredEventNamesForKey($this->transport, 'app-two-key'))
         ->not->toContain('channel_vacated');
 });
+
+it('does not report on a reserved channel', function () {
+    // The Pusher protocol reserves "#" for channels the server owns rather than
+    // the application. webpatser/resonate-users puts a signed-in connection on
+    // "#server-to-user-{id}", which is that person's session rather than a
+    // room: reporting it would post a channel_occupied every time someone
+    // opened a tab and a channel_vacated every time they closed one.
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+
+    $connection = new FakeConnection('sock-1', $app);
+    $channel = app(ChannelManager::class)->for($app)->findOrCreate('#server-to-user-42');
+    $channel->subscribe($connection, null, json_encode(['user_id' => '42']));
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($roster, $webhooks, $context, $channel, $connection) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        $roster->onSubscribe($connection, $channel);
+        $webhooks->onSubscribe($connection, $channel);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+
+        $channel->unsubscribe($connection);
+        $roster->onClose($connection);
+        $webhooks->onClose($connection);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+    });
+
+    expect($this->transport->deliveries)->toBe([]);
+});
+
+it('still reports on an ordinary channel alongside a reserved one', function () {
+    // The exclusion is by prefix, so it must not swallow real traffic from a
+    // connection that happens to also hold a user channel.
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-room-'.uniqid();
+
+    $connection = new FakeConnection('sock-1', $app);
+    $userChannel = app(ChannelManager::class)->for($app)->findOrCreate('#server-to-user-42');
+    $userChannel->subscribe($connection, null, json_encode(['user_id' => '42']));
+    $room = joinPresenceChannel($channelName, $connection, '42');
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+
+    runLoop(function () use ($roster, $webhooks, $context, $userChannel, $room, $connection) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        $roster->onSubscribe($connection, $userChannel);
+        $webhooks->onSubscribe($connection, $userChannel);
+        $roster->onSubscribe($connection, $room);
+        $webhooks->onSubscribe($connection, $room);
+
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.1);
+    });
+
+    expect(deliveredEventNames($this->transport))
+        ->toContain('channel_occupied')
+        ->toContain('member_added');
+
+    foreach ($this->transport->deliveries as $delivery) {
+        foreach (json_decode($delivery['body'], associative: true)['events'] as $event) {
+            expect($event['channel'])->not->toStartWith('#');
+        }
+    }
+});

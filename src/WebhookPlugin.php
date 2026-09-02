@@ -61,6 +61,21 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     protected float $reconcileInterval;
 
     /**
+     * Channel name prefixes this plugin does not report on.
+     *
+     * The Pusher protocol reserves "#" for channels the server owns rather than
+     * the application: `webpatser/resonate-users` subscribes a signed-in
+     * connection to "#server-to-user-{id}" so a message can be addressed to a
+     * person. Those are a user's session, not a room, and reporting them would
+     * post a `channel_occupied` every time someone opened a tab and a
+     * `channel_vacated` every time they closed one, to backends that expect
+     * real channels.
+     *
+     * @var list<string>
+     */
+    protected array $ignoredPrefixes = ['#'];
+
+    /**
      * Channels seen on this node: application id => channel name => true.
      *
      * Keyed by application first, so two applications serving a channel of the
@@ -82,6 +97,10 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
 
         $this->flushInterval = (float) ($config['flush_interval'] ?? 1.0);
         $this->reconcileInterval = (float) ($config['reconcile_interval'] ?? 30.0);
+        $this->ignoredPrefixes = array_values(array_filter(
+            array_map(strval(...), (array) ($config['ignore_channel_prefixes'] ?? ['#'])),
+            static fn (string $prefix): bool => $prefix !== '',
+        ));
 
         $this->occupancy = new OccupancyTracker(
             createRedisClient($this->makeConfig($config['connection'] ?? [])),
@@ -118,7 +137,7 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
      */
     public function onSubscribe(Connection $connection, Channel $channel): void
     {
-        if ($this->occupancy === null) {
+        if ($this->occupancy === null || ! $this->reports($channel->name())) {
             return;
         }
 
@@ -156,6 +175,10 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     public function onUnsubscribe(Connection $connection, Channel $channel): void
     {
         $name = $channel->name();
+
+        if (! $this->reports($name)) {
+            return;
+        }
 
         $subscriptions = $connection->state('webhooks.channels', []);
         $userId = (string) ($subscriptions[$name] ?? '');
@@ -340,6 +363,23 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         if ($this->context->connectionsOn($appId, $name) === []) {
             $this->forget($appId, $name);
         }
+    }
+
+    /**
+     * Determine whether a channel is one this plugin reports on.
+     *
+     * An ignored channel is never tracked, so it produces no occupancy edges
+     * and no reconcile work either.
+     */
+    protected function reports(string $channel): bool
+    {
+        foreach ($this->ignoredPrefixes as $prefix) {
+            if (str_starts_with($channel, $prefix)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

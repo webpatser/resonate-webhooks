@@ -5,6 +5,16 @@ All notable changes to `webpatser/resonate-webhooks` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ignore_channel_prefixes` (default `['#']`): channel name prefixes this plugin never reports on. No occupancy edges, no reconcile work, nothing delivered.
+
+### Fixed
+
+- Stop reporting on the channels the Pusher protocol reserves with `#`. `webpatser/resonate-users` subscribes a signed-in connection to `#server-to-user-{id}` so a message can be addressed to a person, and that channel is one user's session rather than a room: every tab opened posted a `channel_occupied` and every tab closed a `channel_vacated` to backends that expect real channels. Set the new key to an empty array to get the old behaviour back.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
