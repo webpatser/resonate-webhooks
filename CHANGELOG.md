@@ -5,7 +5,7 @@ All notable changes to `webpatser/resonate-webhooks` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-09-02
 
 ### Added
 
@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The reconcile tick takes one snapshot per application instead of one sweep per tracked channel, so its cost no longer grows with how busy the node is. Measured against a node tracking eight channels: 16 `SCAN` commands before, 2 after.
 - Require `webpatser/fledge-fiber` `^13.29` (was `^13.4`), and build the plugin's connection with `RedisConfig::fromParameters()`. TLS, unix sockets, ACL usernames, `read_timeout`, retry settings, client name and tcp keepalive now reach the connection; the hand-built URI dropped them. A configured `url` still wins.
 - `connection.scheme` (`RESONATE_WEBHOOKS_REDIS_SCHEME`, default `tcp`) selects the transport.
+- Allow `webpatser/resonate-roster` 0.4, which carries the pipelined read side this plugin's occupancy reads sit on top of. The constraint stays open to 0.3.1 as well, so an existing install is not forced to move both at once.
 
 ## [0.3.1] - 2026-08-02
 
