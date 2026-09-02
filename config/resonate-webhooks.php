@@ -16,6 +16,7 @@ return [
 
     'connection' => [
         'url' => env('RESONATE_WEBHOOKS_REDIS_URL', env('REDIS_URL')),
+        'scheme' => env('RESONATE_WEBHOOKS_REDIS_SCHEME', env('REDIS_SCHEME', 'tcp')),
         'host' => env('RESONATE_WEBHOOKS_REDIS_HOST', env('REDIS_HOST', '127.0.0.1')),
         'port' => env('RESONATE_WEBHOOKS_REDIS_PORT', env('REDIS_PORT', '6379')),
         'username' => env('RESONATE_WEBHOOKS_REDIS_USERNAME', env('REDIS_USERNAME')),

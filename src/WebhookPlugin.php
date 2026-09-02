@@ -136,11 +136,16 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
         $subscriptions[$name] = $userId;
         $connection->setState('webhooks.channels', $subscriptions);
 
-        if ($this->occupancy->claimOccupied($appId, $name)) {
+        // One read of the channel's cluster-wide occupancy serves both edges.
+        // The claims only write flag keys, never roster keys, so the second
+        // edge cannot observe anything the first one changed.
+        $state = $this->occupancy->state($appId, $name);
+
+        if ($this->occupancy->claimOccupied($appId, $name, $state)) {
             $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
         }
 
-        if ($userId !== '' && $this->occupancy->claimMemberAdded($appId, $name, $userId)) {
+        if ($userId !== '' && $this->occupancy->claimMemberAdded($appId, $name, $userId, $state)) {
             $this->dispatcher?->record(WebhookEvent::memberAdded($appId, $name, $userId));
         }
     }
@@ -265,11 +270,14 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             return;
         }
 
-        if ($userId !== '' && $this->occupancy->claimMemberRemoved($appId, $channel, $userId)) {
+        // As in onSubscribe: read the departed-from channel once, claim twice.
+        $state = $this->occupancy->state($appId, $channel);
+
+        if ($userId !== '' && $this->occupancy->claimMemberRemoved($appId, $channel, $userId, $state)) {
             $this->dispatcher?->record(WebhookEvent::memberRemoved($appId, $channel, $userId));
         }
 
-        if ($this->occupancy->claimVacated($appId, $channel)) {
+        if ($this->occupancy->claimVacated($appId, $channel, $state)) {
             $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $channel));
             $this->forget($appId, $channel);
         }
@@ -283,7 +291,9 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
      */
     protected function reconcile(): void
     {
-        if ($this->occupancy === null) {
+        $occupancy = $this->occupancy;
+
+        if ($occupancy === null) {
             return;
         }
 
@@ -293,18 +303,33 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             // they are used.
             $appId = (string) $appId;
 
+            // One keyspace sweep for the whole application, rather than one per
+            // tracked channel. A tick used to get more expensive the busier the
+            // node was, which is the opposite of what a reconcile pass should
+            // do. A channel missing from the snapshot has no roster key at all,
+            // so it reconciles against an empty state.
+            $snapshot = $occupancy->snapshot($appId);
+
             foreach (array_keys($channels) as $channel) {
-                $this->reconcileChannel($appId, (string) $channel);
+                $channel = (string) $channel;
+
+                $this->reconcileChannel(
+                    $appId,
+                    $channel,
+                    $snapshot[$channel] ?? ['connections' => 0, 'users' => []],
+                );
             }
         }
     }
 
     /**
-     * Reconcile one application's channel against the roster.
+     * Reconcile one application's channel against a slice of the roster read.
+     *
+     * @param  array{connections: int, users: list<string>}  $state
      */
-    protected function reconcileChannel(string $appId, string $name): void
+    protected function reconcileChannel(string $appId, string $name, array $state): void
     {
-        $edge = $this->occupancy?->reconcileOccupancy($appId, $name);
+        $edge = $this->occupancy?->reconcileOccupancy($appId, $name, $state);
 
         if ($edge === 'occupied') {
             $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
@@ -359,30 +384,24 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     /**
      * Build the fledge-fiber Redis configuration from the connection config.
      *
+     * `RedisConfig::fromParameters()` reads the Laravel-shaped connection array
+     * directly. This used to assemble a `redis://user:pass@host:port/db` string
+     * by hand, and everything a URI cannot carry was dropped on the way: the
+     * `tls` / `rediss` scheme, unix socket paths, `read_timeout`, the retry
+     * settings, the client name and tcp keepalive. A configured `url` still
+     * wins, since that form is a URI to begin with.
+     *
      * @param  array<string, mixed>  $server
      */
     protected function makeConfig(array $server): RedisConfig
     {
-        $timeout = (float) ($server['timeout'] ?? RedisConfig::DEFAULT_TIMEOUT);
-
         if (! empty($server['url'])) {
-            return RedisConfig::fromUri($server['url'], $timeout);
+            return RedisConfig::fromUri(
+                (string) $server['url'],
+                (float) ($server['timeout'] ?? RedisConfig::DEFAULT_TIMEOUT),
+            );
         }
 
-        $host = $server['host'] ?? '127.0.0.1';
-        $port = $server['port'] ?? 6379;
-        $database = $server['database'] ?? 0;
-
-        $userInfo = '';
-
-        if (! empty($server['password'])) {
-            $userInfo = rawurlencode((string) ($server['username'] ?? ''))
-                .':'.rawurlencode((string) $server['password']).'@';
-        }
-
-        return RedisConfig::fromUri(
-            sprintf('redis://%s%s:%s/%s', $userInfo, $host, $port, $database),
-            $timeout,
-        );
+        return RedisConfig::fromParameters($server);
     }
 }

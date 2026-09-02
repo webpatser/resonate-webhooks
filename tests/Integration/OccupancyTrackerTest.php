@@ -32,6 +32,23 @@ function flushTrackerKeys(Client $redis): void
     }
 }
 
+/**
+ * The number of SCAN commands Redis has served since the last CONFIG RESETSTAT.
+ *
+ * Read from INFO commandstats, so it counts what actually reached the server
+ * rather than what the tracker believes it issued.
+ */
+function scanCommandCount(Client $redis): int
+{
+    $info = (string) $redis->executeRaw(['INFO', 'commandstats']);
+
+    if (! preg_match('/^cmdstat_scan:calls=(\\d+)/m', $info, $matches)) {
+        return 0;
+    }
+
+    return (int) $matches[1];
+}
+
 function makeTracker(): OccupancyTracker
 {
     return new OccupancyTracker(
@@ -315,4 +332,91 @@ it('vacates a channel whose edge a pre-upgrade flag still holds', function () {
 
     expect($results)->toBe([true, false])
         ->and($this->redis->exists('wh-test:occ:presence-room'))->toBe(0);
+});
+
+it('reads a channel\'s connections and users in one pass', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-2', 'u-2');
+    // A non-presence member: a connection, but not a distinct user.
+    $this->redis->hset('roster-test:app-id:presence-room:node-b', 'sock-3', '');
+
+    $state = null;
+
+    runLoop(function () use (&$state) {
+        $state = makeTracker()->state('app-id', 'presence-room');
+    });
+
+    expect($state['connections'])->toBe(3)
+        ->and($state['users'])->toEqualCanonicalizing(['u-1', 'u-2']);
+});
+
+it('snapshots every occupied channel of an application at once', function () {
+    $this->redis->hset('roster-test:app-id:presence-one:node-a', 'sock-1', 'u-1');
+    $this->redis->hset('roster-test:app-id:presence-two:node-a', 'sock-2', 'u-2');
+    $this->redis->hset('roster-test:app-id:presence-two:node-b', 'sock-3', 'u-3');
+    // Another application's channel must not appear in this snapshot.
+    $this->redis->hset('roster-test:app-two:presence-one:node-a', 'sock-4', 'u-4');
+
+    $snapshot = null;
+
+    runLoop(function () use (&$snapshot) {
+        $snapshot = makeTracker()->snapshot('app-id');
+    });
+
+    expect(array_keys($snapshot))->toEqualCanonicalizing(['presence-one', 'presence-two'])
+        ->and($snapshot['presence-one']['connections'])->toBe(1)
+        ->and($snapshot['presence-two']['connections'])->toBe(2)
+        ->and($snapshot['presence-two']['users'])->toEqualCanonicalizing(['u-2', 'u-3']);
+});
+
+it('snapshots a channel served only by a pre-0.3.0 roster key', function () {
+    $this->redis->hset('roster-test:presence-legacy:node-old', 'sock-1', 'u-1');
+
+    $snapshot = null;
+
+    runLoop(function () use (&$snapshot) {
+        $snapshot = makeTracker()->snapshot('app-id');
+    });
+
+    expect($snapshot)->toHaveKey('presence-legacy')
+        ->and($snapshot['presence-legacy']['connections'])->toBe(1);
+});
+
+it('sweeps the keyspace a fixed number of times however many channels there are', function () {
+    // The reconcile pass used to sweep the keyspace once per tracked channel,
+    // so its cost grew with the busyness of the node. A snapshot is one sweep
+    // for the application, plus one more while the legacy fallback window is
+    // open, whatever the channel count. Guard that here: without the bound a
+    // later refactor could quietly reintroduce the per-channel sweep.
+    foreach (range(1, 8) as $n) {
+        $this->redis->hset("roster-test:app-id:presence-{$n}:node-a", 'sock-'.$n, 'u-'.$n);
+    }
+
+    $this->redis->executeRaw(['CONFIG', 'RESETSTAT']);
+
+    runLoop(function () {
+        makeTracker()->snapshot('app-id');
+    });
+
+    expect(scanCommandCount($this->redis))->toBeLessThanOrEqual(4);
+});
+
+it('reads a channel once when a hook claims both of its edges', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
+
+    $this->redis->executeRaw(['CONFIG', 'RESETSTAT']);
+
+    $claims = [];
+
+    runLoop(function () use (&$claims) {
+        $tracker = makeTracker();
+        $state = $tracker->state('app-id', 'presence-room');
+
+        $claims[] = $tracker->claimOccupied('app-id', 'presence-room', $state);
+        $claims[] = $tracker->claimMemberAdded('app-id', 'presence-room', 'u-1', $state);
+    });
+
+    // Both edges fire off the one read the caller already made.
+    expect($claims)->toBe([true, true])
+        ->and(scanCommandCount($this->redis))->toBeLessThanOrEqual(2);
 });

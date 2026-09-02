@@ -5,6 +5,21 @@ All notable changes to `webpatser/resonate-webhooks` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `OccupancyTracker::state()`: a channel's cluster-wide connection count and distinct users from a single read. A roster key is socket id => presence user id, so the field count and the values answer both questions at once.
+- `OccupancyTracker::snapshot()`: every occupied channel of one application in one keyspace sweep, the async counterpart of `RoomRoster::snapshot()`.
+
+### Changed
+
+- Every claim method (`claimOccupied`, `claimVacated`, `claimMemberAdded`, `claimMemberRemoved`, `reconcileOccupancy`) takes an optional pre-read `$state` as a trailing argument. Existing call sites are unaffected; omitting it reads the channel as before.
+- `onSubscribe` and the departure path read the channel's occupancy once and claim both of their edges from it, instead of each edge sweeping the keyspace for itself. A presence subscribe cost two to four full sweeps of the shared Redis and now costs one (two while the roster's legacy fallback window is open).
+- The reconcile tick takes one snapshot per application instead of one sweep per tracked channel, so its cost no longer grows with how busy the node is. Measured against a node tracking eight channels: 16 `SCAN` commands before, 2 after.
+- Require `webpatser/fledge-fiber` `^13.29` (was `^13.4`), and build the plugin's connection with `RedisConfig::fromParameters()`. TLS, unix sockets, ACL usernames, `read_timeout`, retry settings, client name and tcp keepalive now reach the connection; the hand-built URI dropped them. A configured `url` still wins.
+- `connection.scheme` (`RESONATE_WEBHOOKS_REDIS_SCHEME`, default `tcp`) selects the transport.
+
 ## [0.3.1] - 2026-08-02
 
 ### Fixed

@@ -131,7 +131,7 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `connection` | `REDIS_*` env | Redis server. Must be the same server and database as resonate-roster. |
+| `connection` | `REDIS_*` env | Redis server. Must be the same server and database as resonate-roster. Takes Laravel's connection keys, `scheme` (`tcp`, `tls`/`rediss`, `unix`), `read_timeout` and the retry keys included. |
 | `key_prefix` | `wh` | Namespace for the edge-detection flag keys, which are `{prefix}:{kind}:{appId}:{channel}`. |
 | `ttl` | `90` | Flag-key TTL in seconds, so a dead node's flag self-heals. |
 | `flush_interval` | `1.0` | Seconds between delivery ticks; events in that window are coalesced. |

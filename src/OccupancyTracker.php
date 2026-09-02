@@ -43,17 +43,56 @@ class OccupancyTracker
     }
 
     /**
+     * A channel's cluster-wide occupancy, read from the roster in one pass.
+     *
+     * The connection count and the distinct user ids come out of the same read:
+     * a roster key is socket id => presence user id, so the field count is the
+     * connection count and the values are the users. Asking for them separately
+     * cost two keyspace sweeps and two rounds of per-node reads, and a caller
+     * that needs both (every occupancy hook does) paid it twice per hook.
+     *
+     * @return array{connections: int, users: list<string>}
+     */
+    public function state(string $appId, string $channel): array
+    {
+        return $this->readState($this->rosterKeysFor($appId, $channel));
+    }
+
+    /**
+     * Every occupied channel of one application, in a single keyspace sweep.
+     *
+     * The bulk form of {@see state()}, for the reconcile pass. Reconciling one
+     * channel at a time cost a full sweep per channel per tick, so the tick got
+     * more expensive as the cluster got busier; this costs the same one sweep
+     * (two while the roster's legacy fallback window is open) at any channel
+     * count, plus one read per live node key. It mirrors what
+     * `RoomRoster::snapshot()` does on the synchronous side, over the async
+     * client the server actually runs on.
+     *
+     * A channel absent from the result has no roster key at all, which is the
+     * same thing as being empty.
+     *
+     * @return array<string, array{connections: int, users: list<string>}>
+     */
+    public function snapshot(string $appId): array
+    {
+        $channels = [];
+
+        foreach ($this->rosterKeysByChannel($appId) as $channel => $keys) {
+            // PHP coerces numeric-string array keys to int, so the channel name
+            // is restored to a string before it keys the result.
+            $channels[(string) $channel] = $this->readState(array_values($keys));
+        }
+
+        return $channels;
+    }
+
+    /**
      * The cluster-wide connection count for a channel, read from the roster.
      */
     public function connectionCount(string $appId, string $channel): int
     {
-        $total = 0;
-
-        foreach ($this->rosterKeysFor($appId, $channel) as $key) {
-            $total += $this->redis->getMap($key)->getSize();
-        }
-
-        return $total;
+        return $this->state($appId, $channel)['connections'];
     }
 
     /**
@@ -63,20 +102,7 @@ class OccupancyTracker
      */
     public function users(string $appId, string $channel): array
     {
-        $users = [];
-
-        foreach ($this->rosterKeysFor($appId, $channel) as $key) {
-            foreach ($this->redis->getMap($key)->getAll() as $userId) {
-                if ($userId !== '') {
-                    $users[$userId] = true;
-                }
-            }
-        }
-
-        // PHP silently casts numeric-string array keys ("42") to ints, which
-        // would break the strict in_array() comparisons in the claim methods;
-        // cast back so this is a list<string> as documented.
-        return array_map('strval', array_keys($users));
+        return $this->state($appId, $channel)['users'];
     }
 
     /**
@@ -84,10 +110,17 @@ class OccupancyTracker
      *
      * True for exactly one node: the one whose flag write wins. False while a
      * pre-upgrade flag still holds the channel, since that edge already fired.
+     *
+     * Pass `$state` when the caller has already read the channel's occupancy
+     * for this hook, so the roster is read once rather than once per edge.
+     *
+     * @param  array{connections: int, users: list<string>}|null  $state
      */
-    public function claimOccupied(string $appId, string $channel): bool
+    public function claimOccupied(string $appId, string $channel, ?array $state = null): bool
     {
-        if ($this->connectionCount($appId, $channel) < 1) {
+        $state ??= $this->state($appId, $channel);
+
+        if ($state['connections'] < 1) {
             return false;
         }
 
@@ -100,10 +133,14 @@ class OccupancyTracker
      * Claim the `channel_vacated` edge after an unsubscribe or close.
      *
      * True for exactly one node: the one whose flag delete wins.
+     *
+     * @param  array{connections: int, users: list<string>}|null  $state
      */
-    public function claimVacated(string $appId, string $channel): bool
+    public function claimVacated(string $appId, string $channel, ?array $state = null): bool
     {
-        if ($this->connectionCount($appId, $channel) > 0) {
+        $state ??= $this->state($appId, $channel);
+
+        if ($state['connections'] > 0) {
             return false;
         }
 
@@ -112,10 +149,14 @@ class OccupancyTracker
 
     /**
      * Claim the `member_added` edge for a presence user after a subscribe.
+     *
+     * @param  array{connections: int, users: list<string>}|null  $state
      */
-    public function claimMemberAdded(string $appId, string $channel, string $userId): bool
+    public function claimMemberAdded(string $appId, string $channel, string $userId, ?array $state = null): bool
     {
-        if (! in_array($userId, $this->users($appId, $channel), true)) {
+        $state ??= $this->state($appId, $channel);
+
+        if (! in_array($userId, $state['users'], true)) {
             return false;
         }
 
@@ -126,10 +167,14 @@ class OccupancyTracker
 
     /**
      * Claim the `member_removed` edge for a presence user after a departure.
+     *
+     * @param  array{connections: int, users: list<string>}|null  $state
      */
-    public function claimMemberRemoved(string $appId, string $channel, string $userId): bool
+    public function claimMemberRemoved(string $appId, string $channel, string $userId, ?array $state = null): bool
     {
-        if (in_array($userId, $this->users($appId, $channel), true)) {
+        $state ??= $this->state($appId, $channel);
+
+        if (in_array($userId, $state['users'], true)) {
             return false;
         }
 
@@ -144,10 +189,18 @@ class OccupancyTracker
      *
      * Recovers an edge missed during a crash and refreshes the flag TTL.
      * Returns 'occupied', 'vacated', or null when nothing changed.
+     *
+     * The reconcile pass reads every channel of an application at once through
+     * {@see snapshot()} and hands each channel's slice in here, so this makes
+     * no keyspace sweep of its own unless a caller omits `$state`.
+     *
+     * @param  array{connections: int, users: list<string>}|null  $state
      */
-    public function reconcileOccupancy(string $appId, string $channel): ?string
+    public function reconcileOccupancy(string $appId, string $channel, ?array $state = null): ?string
     {
-        $occupied = $this->connectionCount($appId, $channel) > 0;
+        $state ??= $this->state($appId, $channel);
+
+        $occupied = $state['connections'] > 0;
         $key = $this->flag('occ', $appId, $channel);
         $flagged = $this->redis->has($key);
 
@@ -203,6 +256,80 @@ class OccupancyTracker
     protected function legacyClaimHolds(string $kind, string $suffix): bool
     {
         return $this->rosterKeys->legacyFallback() && $this->redis->has($this->legacyFlag($kind, $suffix));
+    }
+
+    /**
+     * Read a set of roster node keys into one channel's occupancy.
+     *
+     * A roster key is a hash of socket id => presence user id, so one HGETALL
+     * per node yields both figures: the field count is that node's share of the
+     * connections, and the non-empty values are its distinct users. A blank
+     * value is a non-presence member, counted as a connection but not as a user,
+     * exactly as the roster's own reader treats it.
+     *
+     * @param  list<string>  $keys
+     * @return array{connections: int, users: list<string>}
+     */
+    protected function readState(array $keys): array
+    {
+        $connections = 0;
+        $users = [];
+
+        foreach ($keys as $key) {
+            $hash = $this->redis->getMap($key)->getAll();
+
+            $connections += count($hash);
+
+            foreach ($hash as $userId) {
+                if ($userId !== '') {
+                    $users[$userId] = true;
+                }
+            }
+        }
+
+        // PHP silently casts numeric-string array keys ("42") to ints, which
+        // would break the strict in_array() comparisons in the claim methods;
+        // cast back so this is a list<string> as documented.
+        return [
+            'connections' => $connections,
+            'users' => array_map('strval', array_keys($users)),
+        ];
+    }
+
+    /**
+     * Every roster node key of one application, grouped by channel.
+     *
+     * The whole-application form of {@see rosterKeysFor()}, and it holds the
+     * same dual-read window: a node is served from its app-scoped key, or from
+     * its pre-0.3.0 key while the fallback is on and it has no app-scoped one.
+     * Membership is per node, so grouping this way can neither double count a
+     * socket nor drop a node.
+     *
+     * @return array<string, array<string, string>> Channel name => node id => key.
+     */
+    protected function rosterKeysByChannel(string $appId): array
+    {
+        $keys = [];
+
+        foreach ($this->redis->scan($this->rosterKeys->appPattern($appId), 100) as $key) {
+            $channel = $this->rosterKeys->channelFromKey($appId, $key);
+
+            if ($channel !== null) {
+                $keys[$channel][$this->rosterKeys->nodeFromKey($key)] = $key;
+            }
+        }
+
+        if ($this->rosterKeys->legacyFallback()) {
+            foreach ($this->redis->scan($this->rosterKeys->legacyAllPattern(), 100) as $key) {
+                $channel = $this->rosterKeys->legacyChannelFromKey($key);
+
+                if ($channel !== null) {
+                    $keys[$channel][$this->rosterKeys->nodeFromKey($key)] ??= $key;
+                }
+            }
+        }
+
+        return $keys;
     }
 
     /**
