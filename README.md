@@ -152,8 +152,8 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 ## Requirements
 
 - PHP 8.5+
-- Resonate 0.4+
-- `webpatser/resonate-roster` 0.3+, configured with `track => all`
+- Resonate 0.7+
+- `webpatser/resonate-roster` 0.7+, configured with `track => all`
 - A Redis server reachable from the Resonate process
 
 ## Testing

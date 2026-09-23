@@ -5,6 +5,13 @@ All notable changes to `webpatser/resonate-webhooks` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-23
+
+### Changed
+
+- Versioning now tracks `webpatser/resonate`'s minor version: `0.7.x` targets resonate 0.7.
+- Require `webpatser/resonate` `^0.7` and `webpatser/resonate-roster` `^0.7` (was `^0.4|^0.5|^0.6|^0.7` and `^0.3.1|^0.4`), dropping support for resonate 0.6 and earlier.
+
 ## [0.5.0] - 2026-09-23
 
 ### Added
