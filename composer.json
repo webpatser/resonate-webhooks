@@ -14,7 +14,7 @@
         "php": "^8.5",
         "illuminate/contracts": "^13.0",
         "illuminate/support": "^13.0",
-        "webpatser/fledge-fiber": "^13.29",
+        "webpatser/fledge-fiber": "^13.38",
         "webpatser/resonate": "^0.7",
         "webpatser/resonate-roster": "^0.7"
     },
