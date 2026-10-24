@@ -147,13 +147,14 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 - **In-process delivery.** Retries are bounded; a webhook is lost if the server crashes before delivery. The roster remains queryable as the source of truth.
 - **Exactly-once per cluster.** Edges are claimed atomically, so a scaled deployment does not double-send.
 - **Per application.** Occupancy is read and claimed per application, so a channel name shared by two applications produces two independent sets of edges.
-- **Upgrade with the roster.** This version reads the roster's app-scoped keys (roster 0.3+) and honours its `legacy_fallback` window, so deploy both together and follow the roster's upgrade procedure. While that window is open, a channel that was occupied before the upgrade is not re-announced as `channel_occupied`.
+- **Upgrade with the roster.** This version reads only the roster's app-scoped keys and requires roster 1.0. Coming from a roster older than 0.3.0, upgrade both packages through 0.7.x first; see [UPGRADE.md](UPGRADE.md).
+- **Not Redis Cluster safe.** Occupancy is read with `SCAN` over the roster's keys, which on Redis Cluster only walks one node. Use a single Redis server.
 
 ## Requirements
 
 - PHP 8.5+
-- Resonate 0.7+
-- `webpatser/resonate-roster` 0.7+, configured with `track => all`
+- Resonate 1.0+
+- `webpatser/resonate-roster` 1.0+, configured with `track => all`
 - A Redis server reachable from the Resonate process
 
 ## Testing
