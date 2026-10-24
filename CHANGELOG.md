@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Require `webpatser/resonate` `^1.0` and `webpatser/resonate-roster` `^1.0` (was `^0.7` for both).
 
+### Fixed
+
+- `OccupancyTracker` now confirms the exact channel of every scanned roster key. The `SCAN` glob for a channel also matched channels extending it with a colon (`presence-room.7:x`), whose connections and users leaked into the occupancy and member edges of `presence-room.7`.
+
 ### Breaking
 
 - Coming from a roster or webhooks release older than 0.3.0, upgrade through 0.7.x first and finish the roster key migration there; see [UPGRADE.md](UPGRADE.md).

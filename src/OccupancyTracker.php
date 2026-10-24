@@ -294,6 +294,12 @@ class OccupancyTracker
         $keys = [];
 
         foreach ($this->redis->scan($this->rosterKeys->scanPattern($appId, $channel), 100) as $key) {
+            // The scan pattern is a glob prefix: `presence-room.7:x` also matches
+            // the pattern for `presence-room.7`, so confirm the channel exactly.
+            if ($this->rosterKeys->channelFromKey($appId, $key) !== $channel) {
+                continue;
+            }
+
             $keys[$this->rosterKeys->nodeFromKey($key)] = $key;
         }
 

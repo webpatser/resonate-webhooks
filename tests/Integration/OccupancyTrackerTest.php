@@ -73,6 +73,23 @@ it('counts connections across nodes from the roster', function () {
     expect($count)->toBe(3);
 });
 
+it('does not count a channel whose name extends another with a colon', function () {
+    $this->redis->hset('roster-test:app-id:presence-room.7:node-a', 'sock-1', 'u-alice');
+    $this->redis->hset('roster-test:app-id:presence-room.7:x:node-b', 'sock-2', 'u-mallory');
+
+    $state = null;
+    $claimed = null;
+
+    runLoop(function () use (&$state, &$claimed) {
+        $tracker = makeTracker();
+        $state = $tracker->state('app-id', 'presence-room.7');
+        $claimed = $tracker->claimMemberAdded('app-id', 'presence-room.7', 'u-mallory');
+    });
+
+    expect($state)->toBe(['connections' => 1, 'users' => ['u-alice']])
+        ->and($claimed)->toBeFalse();
+});
+
 it('counts only the application it is asked about', function () {
     $this->redis->hset('roster-test:app-id:presence-lobby:node-a', 'sock-1', 'u-1');
     $this->redis->hset('roster-test:app-two:presence-lobby:node-a', 'sock-2', 'u-2');
