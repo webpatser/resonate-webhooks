@@ -49,6 +49,19 @@ function scanCommandCount(Client $redis): int
     return (int) $matches[1];
 }
 
+/**
+ * The number of SCAN commands the server served while the closure ran in the
+ * event loop.
+ */
+function scansDuring(Client $redis, Closure $body): int
+{
+    $redis->executeRaw(['CONFIG', 'RESETSTAT']);
+
+    runLoop($body);
+
+    return scanCommandCount($redis);
+}
+
 function makeTracker(): OccupancyTracker
 {
     return new OccupancyTracker(
@@ -329,27 +342,32 @@ it('sweeps the keyspace a fixed number of times however many channels there are'
     // for the application, whatever the channel count. Guard that here:
     // without the bound a later refactor could quietly reintroduce the
     // per-channel sweep.
-    foreach (range(1, 8) as $n) {
+    //
+    // A SCAN sweep takes one call per batch of the whole database, so the
+    // absolute count depends on whatever else lives in db 15. Compare against
+    // a one-channel snapshot of the same database instead.
+    $this->redis->hset('roster-test:app-id:presence-1:node-a', 'sock-1', 'u-1');
+
+    $one = scansDuring($this->redis, fn () => makeTracker()->snapshot('app-id'));
+
+    foreach (range(2, 8) as $n) {
         $this->redis->hset("roster-test:app-id:presence-{$n}:node-a", 'sock-'.$n, 'u-'.$n);
     }
 
-    $this->redis->executeRaw(['CONFIG', 'RESETSTAT']);
+    $eight = scansDuring($this->redis, fn () => makeTracker()->snapshot('app-id'));
 
-    runLoop(function () {
-        makeTracker()->snapshot('app-id');
-    });
-
-    expect(scanCommandCount($this->redis))->toBeLessThanOrEqual(4);
+    expect($eight)->toBe($one);
 });
 
 it('reads a channel once when a hook claims both of its edges', function () {
     $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
 
-    $this->redis->executeRaw(['CONFIG', 'RESETSTAT']);
+    // The cost of a single read of this channel in the current database.
+    $oneRead = scansDuring($this->redis, fn () => makeTracker()->state('app-id', 'presence-room'));
 
     $claims = [];
 
-    runLoop(function () use (&$claims) {
+    $scans = scansDuring($this->redis, function () use (&$claims) {
         $tracker = makeTracker();
         $state = $tracker->state('app-id', 'presence-room');
 
@@ -359,5 +377,6 @@ it('reads a channel once when a hook claims both of its edges', function () {
 
     // Both edges fire off the one read the caller already made.
     expect($claims)->toBe([true, true])
-        ->and(scanCommandCount($this->redis))->toBeLessThanOrEqual(2);
+        ->and($oneRead)->toBeGreaterThan(0)
+        ->and($scans)->toBe($oneRead);
 });
