@@ -104,9 +104,9 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
 
         $this->occupancy = new OccupancyTracker(
             createRedisClient($this->makeConfig($config['connection'] ?? [])),
-            // Built from the roster's own config, so the key prefix and the
-            // legacy fallback window are read from one place instead of being
-            // re-typed here and silently drifting from the roster's defaults.
+            // Built from the roster's own config, so the key prefix is read
+            // from one place instead of being re-typed here and silently
+            // drifting from the roster's default.
             RosterKeys::fromConfig(config('resonate-roster', [])),
             $config['key_prefix'] ?? 'wh',
             (int) ($config['ttl'] ?? 90),

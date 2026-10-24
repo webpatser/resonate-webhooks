@@ -18,12 +18,6 @@ use Webpatser\ResonateRoster\RosterKeys;
  * Every read and every flag is scoped to one application: two applications
  * that both serve a "presence-lobby" get their own occupancy edges, instead of
  * the second one's subscription being swallowed by the first one's flag.
- *
- * Roster keys older than roster 0.3.0 carry no application. While the roster's
- * `legacy_fallback` window is open this tracker reads those too (per node, so
- * an upgraded and a not-yet-upgraded node are both counted) and treats a
- * pre-upgrade occupied flag as a claim already made, so an upgrade does not
- * re-announce channels that were occupied all along.
  */
 class OccupancyTracker
 {
@@ -63,9 +57,8 @@ class OccupancyTracker
      *
      * The bulk form of {@see state()}, for the reconcile pass. Reconciling one
      * channel at a time cost a full sweep per channel per tick, so the tick got
-     * more expensive as the cluster got busier; this costs the same one sweep
-     * (two while the roster's legacy fallback window is open) at any channel
-     * count, plus one read per live node key. It mirrors what
+     * more expensive as the cluster got busier; this costs the same one sweep at
+     * any channel count, plus one read per live node key. It mirrors what
      * `RoomRoster::snapshot()` does on the synchronous side, over the async
      * client the server actually runs on.
      *
@@ -108,8 +101,7 @@ class OccupancyTracker
     /**
      * Claim the `channel_occupied` edge after a subscribe.
      *
-     * True for exactly one node: the one whose flag write wins. False while a
-     * pre-upgrade flag still holds the channel, since that edge already fired.
+     * True for exactly one node: the one whose flag write wins.
      *
      * Pass `$state` when the caller has already read the channel's occupancy
      * for this hook, so the roster is read once rather than once per edge.
@@ -124,9 +116,7 @@ class OccupancyTracker
             return false;
         }
 
-        $claimed = $this->claimFlag($this->flag('occ', $appId, $channel));
-
-        return $claimed && ! $this->legacyClaimHolds('occ', $channel);
+        return $this->claimFlag($this->flag('occ', $appId, $channel));
     }
 
     /**
@@ -144,7 +134,7 @@ class OccupancyTracker
             return false;
         }
 
-        return $this->releaseFlag($this->flag('occ', $appId, $channel), $this->legacyFlag('occ', $channel));
+        return $this->releaseFlag($this->flag('occ', $appId, $channel));
     }
 
     /**
@@ -160,9 +150,7 @@ class OccupancyTracker
             return false;
         }
 
-        $claimed = $this->claimFlag($this->flag('mem', $appId, $channel.':'.$userId));
-
-        return $claimed && ! $this->legacyClaimHolds('mem', $channel.':'.$userId);
+        return $this->claimFlag($this->flag('mem', $appId, $channel.':'.$userId));
     }
 
     /**
@@ -178,10 +166,7 @@ class OccupancyTracker
             return false;
         }
 
-        return $this->releaseFlag(
-            $this->flag('mem', $appId, $channel.':'.$userId),
-            $this->legacyFlag('mem', $channel.':'.$userId),
-        );
+        return $this->releaseFlag($this->flag('mem', $appId, $channel.':'.$userId));
     }
 
     /**
@@ -206,7 +191,7 @@ class OccupancyTracker
 
         if ($occupied) {
             if (! $flagged) {
-                return $this->claimFlag($key) && ! $this->legacyClaimHolds('occ', $channel) ? 'occupied' : null;
+                return $this->claimFlag($key) ? 'occupied' : null;
             }
 
             $this->redis->expireIn($key, $this->ttl);
@@ -214,7 +199,7 @@ class OccupancyTracker
             return null;
         }
 
-        return $this->releaseFlag($key, $this->legacyFlag('occ', $channel)) ? 'vacated' : null;
+        return $this->releaseFlag($key) ? 'vacated' : null;
     }
 
     /**
@@ -230,32 +215,13 @@ class OccupancyTracker
     }
 
     /**
-     * Release an edge: drop the app-scoped flag and any pre-upgrade one.
+     * Release an edge: drop its flag key.
      *
-     * True when either delete won, so the edge fires exactly once whichever
-     * schema the flag was claimed under.
+     * True only for the node whose delete wins, so the edge fires exactly once.
      */
-    protected function releaseFlag(string $key, string $legacyKey): bool
+    protected function releaseFlag(string $key): bool
     {
-        $released = $this->redis->delete($key) > 0;
-
-        if ($this->rosterKeys->legacyFallback()) {
-            $released = $this->redis->delete($legacyKey) > 0 || $released;
-        }
-
-        return $released;
-    }
-
-    /**
-     * Whether a pre-upgrade flag already holds this edge.
-     *
-     * The pre-upgrade flag carries no application, so during the window it is
-     * read as "some node already announced this channel". It expires on its
-     * own TTL once the last pre-upgrade node is gone.
-     */
-    protected function legacyClaimHolds(string $kind, string $suffix): bool
-    {
-        return $this->rosterKeys->legacyFallback() && $this->redis->has($this->legacyFlag($kind, $suffix));
+        return $this->redis->delete($key) > 0;
     }
 
     /**
@@ -299,11 +265,7 @@ class OccupancyTracker
     /**
      * Every roster node key of one application, grouped by channel.
      *
-     * The whole-application form of {@see rosterKeysFor()}, and it holds the
-     * same dual-read window: a node is served from its app-scoped key, or from
-     * its pre-0.3.0 key while the fallback is on and it has no app-scoped one.
-     * Membership is per node, so grouping this way can neither double count a
-     * socket nor drop a node.
+     * The whole-application form of {@see rosterKeysFor()}.
      *
      * @return array<string, array<string, string>> Channel name => node id => key.
      */
@@ -319,26 +281,11 @@ class OccupancyTracker
             }
         }
 
-        if ($this->rosterKeys->legacyFallback()) {
-            foreach ($this->redis->scan($this->rosterKeys->legacyAllPattern(), 100) as $key) {
-                $channel = $this->rosterKeys->legacyChannelFromKey($key);
-
-                if ($channel !== null) {
-                    $keys[$channel][$this->rosterKeys->nodeFromKey($key)] ??= $key;
-                }
-            }
-        }
-
         return $keys;
     }
 
     /**
-     * The roster's per-node keys for a channel, app-scoped key first.
-     *
-     * One key per node: the app-scoped key when that node writes it, and the
-     * node's pre-0.3.0 key while the fallback window is open and it does not.
-     * That is what keeps a rolling deploy from reading a channel as empty and
-     * firing a spurious `channel_vacated`.
+     * The roster's per-node keys for a channel of one application.
      *
      * @return list<string>
      */
@@ -350,16 +297,6 @@ class OccupancyTracker
             $keys[$this->rosterKeys->nodeFromKey($key)] = $key;
         }
 
-        if ($this->rosterKeys->legacyFallback()) {
-            foreach ($this->redis->scan($this->rosterKeys->legacyScanPattern($channel), 100) as $key) {
-                if (! $this->rosterKeys->isLegacyKeyFor($channel, $key)) {
-                    continue;
-                }
-
-                $keys[$this->rosterKeys->nodeFromKey($key)] ??= $key;
-            }
-        }
-
         return array_values($keys);
     }
 
@@ -369,13 +306,5 @@ class OccupancyTracker
     protected function flag(string $kind, string $appId, string $suffix): string
     {
         return $this->prefix.':'.$kind.':'.$appId.':'.$suffix;
-    }
-
-    /**
-     * Build the pre-upgrade flag key, which carried no application.
-     */
-    protected function legacyFlag(string $kind, string $suffix): string
-    {
-        return $this->prefix.':'.$kind.':'.$suffix;
     }
 }

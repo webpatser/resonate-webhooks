@@ -242,96 +242,33 @@ it('reconciles a missed occupied edge against the roster', function () {
         ->and($this->redis->exists('wh-test:occ:app-id:presence-room'))->toBe(1);
 });
 
-it('counts a pre-0.3.0 roster key while the fallback window is open', function () {
-    // A node that has not been upgraded yet still writes the unscoped key.
+it('ignores pre-0.3.0 unscoped roster keys', function () {
     $this->redis->hset('roster-test:presence-room:node-old', 'sock-1', 'u-1');
 
     $count = null;
-    $users = [];
+    $snapshot = null;
 
-    runLoop(function () use (&$count, &$users) {
+    runLoop(function () use (&$count, &$snapshot) {
         $count = makeTracker()->connectionCount('app-id', 'presence-room');
-        $users = makeTracker()->users('app-id', 'presence-room');
+        $snapshot = makeTracker()->snapshot('app-id');
     });
 
-    expect($count)->toBe(1)
-        ->and($users)->toBe(['u-1']);
+    expect($count)->toBe(0)
+        ->and($snapshot)->toBe([]);
 });
 
-it('reads an upgraded and a not-yet-upgraded node together mid-deploy', function () {
-    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
-    $this->redis->hset('roster-test:presence-room:node-b', 'sock-2', 'u-2');
-
-    $count = null;
-
-    runLoop(function () use (&$count) {
-        $count = makeTracker()->connectionCount('app-id', 'presence-room');
-    });
-
-    // Both nodes counted, and neither counted twice.
-    expect($count)->toBe(2);
-});
-
-it('prefers the app-scoped key over the pre-0.3.0 key of the same node', function () {
-    $this->redis->hset('roster-test:presence-room:node-a', 'sock-stale', 'u-stale');
-    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
-
-    $users = [];
-
-    runLoop(function () use (&$users) {
-        $users = makeTracker()->users('app-id', 'presence-room');
-    });
-
-    expect($users)->toBe(['u-1']);
-});
-
-it('ignores pre-0.3.0 roster keys once the window is closed', function () {
-    config()->set('resonate-roster.legacy_fallback', false);
-
-    $this->redis->hset('roster-test:presence-room:node-old', 'sock-1', 'u-1');
-
-    $count = null;
-
-    runLoop(function () use (&$count) {
-        $count = makeTracker()->connectionCount('app-id', 'presence-room');
-    });
-
-    expect($count)->toBe(0);
-});
-
-it('does not re-announce a channel a pre-upgrade flag already holds', function () {
-    // The channel was occupied before the upgrade, so the unscoped flag holds
-    // its edge. Claiming under the new schema must not post a second
-    // channel_occupied for a channel that never vacated.
+it('ignores a pre-0.3.0 unscoped flag when claiming an edge', function () {
     $this->redis->set('wh-test:occ:presence-room', '1');
     $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
 
     $claimed = null;
-    $edge = null;
 
-    runLoop(function () use (&$claimed, &$edge) {
+    runLoop(function () use (&$claimed) {
         $claimed = makeTracker()->claimOccupied('app-id', 'presence-room');
-        $edge = makeTracker()->reconcileOccupancy('app-id', 'presence-room');
     });
 
-    expect($claimed)->toBeFalse()
-        ->and($edge)->toBeNull()
-        // The edge is adopted, so the app-scoped flag now holds it.
+    expect($claimed)->toBeTrue()
         ->and($this->redis->exists('wh-test:occ:app-id:presence-room'))->toBe(1);
-});
-
-it('vacates a channel whose edge a pre-upgrade flag still holds', function () {
-    $this->redis->set('wh-test:occ:presence-room', '1');
-
-    $results = [];
-
-    runLoop(function () use (&$results) {
-        $results[] = makeTracker()->claimVacated('app-id', 'presence-room');
-        $results[] = makeTracker()->claimVacated('app-id', 'presence-room');
-    });
-
-    expect($results)->toBe([true, false])
-        ->and($this->redis->exists('wh-test:occ:presence-room'))->toBe(0);
 });
 
 it('reads a channel\'s connections and users in one pass', function () {
@@ -369,25 +306,12 @@ it('snapshots every occupied channel of an application at once', function () {
         ->and($snapshot['presence-two']['users'])->toEqualCanonicalizing(['u-2', 'u-3']);
 });
 
-it('snapshots a channel served only by a pre-0.3.0 roster key', function () {
-    $this->redis->hset('roster-test:presence-legacy:node-old', 'sock-1', 'u-1');
-
-    $snapshot = null;
-
-    runLoop(function () use (&$snapshot) {
-        $snapshot = makeTracker()->snapshot('app-id');
-    });
-
-    expect($snapshot)->toHaveKey('presence-legacy')
-        ->and($snapshot['presence-legacy']['connections'])->toBe(1);
-});
-
 it('sweeps the keyspace a fixed number of times however many channels there are', function () {
     // The reconcile pass used to sweep the keyspace once per tracked channel,
     // so its cost grew with the busyness of the node. A snapshot is one sweep
-    // for the application, plus one more while the legacy fallback window is
-    // open, whatever the channel count. Guard that here: without the bound a
-    // later refactor could quietly reintroduce the per-channel sweep.
+    // for the application, whatever the channel count. Guard that here:
+    // without the bound a later refactor could quietly reintroduce the
+    // per-channel sweep.
     foreach (range(1, 8) as $n) {
         $this->redis->hset("roster-test:app-id:presence-{$n}:node-a", 'sock-'.$n, 'u-'.$n);
     }
