@@ -354,6 +354,11 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
     {
         $edge = $this->occupancy?->reconcileOccupancy($appId, $name, $state);
 
+        // Member flags carry the same TTL as the occupied flag, so they are
+        // refreshed on the same tick; otherwise a member who stays longer than
+        // the TTL leaves without a member_removed edge.
+        $this->occupancy?->refreshMembers($appId, $name, $state['users']);
+
         if ($edge === 'occupied') {
             $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
         } elseif ($edge === 'vacated') {

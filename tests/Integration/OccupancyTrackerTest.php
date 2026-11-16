@@ -25,7 +25,7 @@ afterEach(function () {
 
 function flushTrackerKeys(Client $redis): void
 {
-    foreach (['roster-test:*', 'wh-test:*'] as $pattern) {
+    foreach (['roster-test:*', 'roster-test-nodes:*', 'wh-test:*'] as $pattern) {
         foreach ($redis->keys($pattern) as $key) {
             $redis->del($key);
         }
@@ -62,14 +62,39 @@ function scansDuring(Client $redis, Closure $body): int
     return scanCommandCount($redis);
 }
 
-function makeTracker(): OccupancyTracker
+function makeTracker(int $ttl = 90, ?RosterKeys $rosterKeys = null): OccupancyTracker
 {
     return new OccupancyTracker(
         createRedisClient(RedisConfig::fromUri('redis://127.0.0.1:6379/15')),
-        RosterKeys::fromConfig(config('resonate-roster')),
+        $rosterKeys ?? RosterKeys::fromConfig(config('resonate-roster')),
         'wh-test',
-        90,
+        $ttl,
     );
+}
+
+/**
+ * A roster key schema that has the node index key.
+ *
+ * The real schema when the installed roster release ships nodeIndexKey();
+ * otherwise a subclass adding exactly that method, with the roster's own
+ * "{prefix}-nodes:{appId}:{channel}" layout, so the index path is covered
+ * before the roster dependency is bumped.
+ */
+function indexedRosterKeys(): RosterKeys
+{
+    $prefix = RosterKeys::fromConfig(config('resonate-roster'))->prefix();
+
+    if (method_exists(RosterKeys::class, 'nodeIndexKey')) {
+        return new RosterKeys($prefix);
+    }
+
+    return new class($prefix) extends RosterKeys
+    {
+        public function nodeIndexKey(string $appId, string $channel): string
+        {
+            return $this->prefix.'-nodes:'.$appId.':'.$channel;
+        }
+    };
 }
 
 it('counts connections across nodes from the roster', function () {
@@ -258,6 +283,68 @@ it('claims member edges for numeric user ids despite PHP key casting', function 
         ->and($removed)->toBe([true, false]);
 });
 
+it('keeps a member flag armed past the ttl while the member stays', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
+
+    $added = null;
+
+    runLoop(function () use (&$added) {
+        $added = makeTracker(2)->claimMemberAdded('app-id', 'presence-room', 'u-7');
+    });
+
+    // The member stays for longer than the ttl; the reconcile tick keeps
+    // refreshing their flag in the meantime.
+    for ($tick = 0; $tick < 3; $tick++) {
+        usleep(1_000_000);
+
+        runLoop(function () {
+            $tracker = makeTracker(2);
+            $state = $tracker->state('app-id', 'presence-room');
+            $tracker->refreshMembers('app-id', 'presence-room', $state['users']);
+        });
+    }
+
+    // The member leaves after 3 s, well past the 2 s ttl.
+    $this->redis->del('roster-test:app-id:presence-room:node-a');
+
+    $removed = null;
+
+    runLoop(function () use (&$removed) {
+        $removed = makeTracker(2)->claimMemberRemoved('app-id', 'presence-room', 'u-7');
+    });
+
+    expect($added)->toBeTrue()
+        ->and($removed)->toBeTrue();
+});
+
+it('silently heals a lapsed member flag while the member is present', function () {
+    // The member is present but their flag has already expired.
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
+
+    $added = null;
+
+    runLoop(function () use (&$added) {
+        $tracker = makeTracker(2);
+        $tracker->refreshMembers('app-id', 'presence-room', ['u-7']);
+        // The flag is back, so no second member_added edge is claimed.
+        $added = $tracker->claimMemberAdded('app-id', 'presence-room', 'u-7');
+    });
+
+    $ttl = $this->redis->ttl('wh-test:mem:app-id:presence-room:u-7');
+
+    $this->redis->del('roster-test:app-id:presence-room:node-a');
+
+    $removed = null;
+
+    runLoop(function () use (&$removed) {
+        $removed = makeTracker(2)->claimMemberRemoved('app-id', 'presence-room', 'u-7');
+    });
+
+    expect($added)->toBeFalse()
+        ->and($ttl)->toBeGreaterThan(0)->toBeLessThanOrEqual(2)
+        ->and($removed)->toBeTrue();
+});
+
 it('reconciles a missed occupied edge against the roster', function () {
     // The roster shows a connection but no occupied flag was ever set.
     $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
@@ -357,6 +444,40 @@ it('sweeps the keyspace a fixed number of times however many channels there are'
     $eight = scansDuring($this->redis, fn () => makeTracker()->snapshot('app-id'));
 
     expect($eight)->toBe($one);
+});
+
+it('reads a channel from the roster node index without sweeping the keyspace', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-2', 'u-2');
+    $this->redis->hset('roster-test:app-id:presence-room:node-b', 'sock-3', 'u-1');
+    // node-dead died without cleaning up: its hash expired, its index entry did not.
+    $this->redis->sadd('roster-test-nodes:app-id:presence-room', ['node-a', 'node-b', 'node-dead']);
+
+    $state = null;
+
+    $scans = scansDuring($this->redis, function () use (&$state) {
+        $state = makeTracker(rosterKeys: indexedRosterKeys())->state('app-id', 'presence-room');
+    });
+
+    expect($scans)->toBe(0)
+        ->and($state['connections'])->toBe(3)
+        ->and($state['users'])->toEqualCanonicalizing(['u-1', 'u-2']);
+});
+
+it('falls back to sweeping the keyspace when the roster node index is absent', function () {
+    // Older roster nodes write the hashes but never the index.
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-1');
+    $this->redis->hset('roster-test:app-id:presence-room:node-b', 'sock-2', 'u-2');
+
+    $state = null;
+
+    $scans = scansDuring($this->redis, function () use (&$state) {
+        $state = makeTracker(rosterKeys: indexedRosterKeys())->state('app-id', 'presence-room');
+    });
+
+    expect($scans)->toBeGreaterThan(0)
+        ->and($state['connections'])->toBe(2)
+        ->and($state['users'])->toEqualCanonicalizing(['u-1', 'u-2']);
 });
 
 it('reads a channel once when a hook claims both of its edges', function () {

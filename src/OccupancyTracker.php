@@ -203,6 +203,28 @@ class OccupancyTracker
     }
 
     /**
+     * Keep the member flags of every present user armed.
+     *
+     * A member flag carries the TTL so a dead node's flag self-heals, but a
+     * member who stays longer than that TTL would otherwise lose the flag, and
+     * the later `member_removed` claim would find nothing to delete. The
+     * reconcile pass calls this with each channel's roster slice, so a flag
+     * lives exactly as long as its member is present.
+     *
+     * A flag that already lapsed is re-claimed silently: the member is present,
+     * so no `member_added` edge is owed; the flag only has to exist again for
+     * the departure to be claimed.
+     *
+     * @param  list<string>  $users  Presence user ids currently in the roster.
+     */
+    public function refreshMembers(string $appId, string $channel, array $users): void
+    {
+        foreach ($users as $userId) {
+            $this->claimFlag($this->flag('mem', $appId, $channel.':'.$userId));
+        }
+    }
+
+    /**
      * Claim a flag key: set it if absent, and refresh its TTL either way.
      */
     protected function claimFlag(string $key): bool
@@ -287,9 +309,60 @@ class OccupancyTracker
     /**
      * The roster's per-node keys for a channel of one application.
      *
+     * Read from the roster's node index set when there is one: one SMEMBERS
+     * instead of a sweep of the whole keyspace on every subscribe, unsubscribe
+     * and close. A node id in the index whose hash already expired (a node that
+     * died without cleaning up) yields a key that reads as empty, so it counts
+     * as zero members.
+     *
+     * Falls back to the SCAN when the index is empty or absent: a roster
+     * release without {@see RosterKeys::nodeIndexKey()}, or older roster nodes
+     * still running that never write the index.
+     *
      * @return list<string>
      */
     protected function rosterKeysFor(string $appId, string $channel): array
+    {
+        return $this->indexedRosterKeysFor($appId, $channel)
+            ?? $this->scannedRosterKeysFor($appId, $channel);
+    }
+
+    /**
+     * The roster's per-node keys for a channel, read from the node index set.
+     *
+     * Null when the installed roster has no index key or the index is empty,
+     * which tells the caller to sweep instead. Redis drops a set with no
+     * members, so an empty index and a missing one look the same here.
+     *
+     * @return list<string>|null
+     */
+    protected function indexedRosterKeysFor(string $appId, string $channel): ?array
+    {
+        if (! method_exists($this->rosterKeys, 'nodeIndexKey')) {
+            return null;
+        }
+
+        $nodes = $this->redis->getSet($this->rosterKeys->nodeIndexKey($appId, $channel))->getAll();
+
+        if ($nodes === []) {
+            return null;
+        }
+
+        $keys = [];
+
+        foreach ($nodes as $node) {
+            $keys[] = $this->rosterKeys->hashKey($appId, $channel, (string) $node);
+        }
+
+        return $keys;
+    }
+
+    /**
+     * The roster's per-node keys for a channel, found by sweeping the keyspace.
+     *
+     * @return list<string>
+     */
+    protected function scannedRosterKeysFor(string $appId, string $channel): array
     {
         $keys = [];
 
