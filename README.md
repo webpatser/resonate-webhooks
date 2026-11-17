@@ -142,6 +142,29 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 | `max_attempts` | `5` | Delivery attempts before a webhook is dropped. |
 | `endpoints` | `[]` | The endpoints that receive webhooks. |
 
+### Limits
+
+Four bounds keep a slow or unreachable endpoint from growing memory without limit. Set any of them to `0` to restore the old unbounded behaviour.
+
+| Key | Env variable | Default | Meaning |
+|-----|--------------|---------|---------|
+| `max_buffered_events` | `RESONATE_WEBHOOKS_MAX_BUFFERED_EVENTS` | `10000` | Events held between delivery ticks. |
+| `max_pending_deliveries` | `RESONATE_WEBHOOKS_MAX_PENDING` | `1000` | Built deliveries awaiting or retrying. |
+| `max_request_bytes` | `RESONATE_WEBHOOKS_MAX_REQUEST_BYTES` | `1048576` | Largest encoded size of the events in one request. A bigger batch is split into several signed POSTs, sent to an endpoint one after the other in order; they can share one `time_ms`. |
+| `max_in_flight_per_endpoint` | `RESONATE_WEBHOOKS_MAX_IN_FLIGHT` | `16` | Concurrent POSTs to one endpoint URL. The rest wait for a later delivery tick. |
+
+When the event buffer is full, room is made in this order:
+
+1. A buffered occupied/vacated pair for one channel, or member added/removed pair for one member, is cancelled. The receiver loses nothing it needs.
+2. The oldest `client_event` is dropped.
+3. The oldest event is dropped.
+
+When an occupancy or membership edge is dropped, a warning is logged saying receivers need a resync.
+
+When the pending list is full, the oldest delivery that is not in flight is dropped and `WebhookDropped` fires. If all are in flight, the new delivery is dropped instead. A delivery waiting for an in-flight slot or for its previous chunk can be dropped with 0 attempts. A dropped delivery may contain occupancy edges, so receivers that track occupancy should resync when they see drops.
+
+Redirects are not followed: a 3xx response counts as a failed delivery. Point the webhook URL at the final address.
+
 ## Notes and caveats
 
 - **Same Redis as the roster.** The plugin reads roster keys and writes its flag keys on one connection; it must point at the same server and database as resonate-roster.

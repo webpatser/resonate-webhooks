@@ -7,12 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The default HTTP client no longer follows redirects. A 3xx response counts as a failed delivery and is retried like any other non-2xx. A client passed into the transport's constructor keeps its own redirect setting.
+
+### Added
+
+- Four limits, each unbounded when set to `0`: `max_buffered_events` (10000), `max_pending_deliveries` (1000), `max_request_bytes` (1048576) and `max_in_flight_per_endpoint` (16).
+
 ### Fixed
 
 - Member flags are re-armed on every reconcile pass and lapsed flags heal silently, so `member_removed` is sent for sessions longer than the flag TTL.
 
 ### Changed
 
+- A batch larger than `max_request_bytes` is split into several signed POSTs, sent to an endpoint one after the other in order; they can share one `time_ms`. More than `max_in_flight_per_endpoint` deliveries to one endpoint wait for a later drain tick.
 - Channel state reads use the roster's per-channel node index (`SMEMBERS`) and fall back to the keyspace `SCAN` when the index is absent or the installed `resonate-roster` predates it.
 
 
