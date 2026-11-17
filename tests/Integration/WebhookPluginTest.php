@@ -521,3 +521,44 @@ it('still reports on an ordinary channel alongside a reserved one', function () 
         }
     }
 });
+
+it('re-emits member_added once on reconcile for a present member whose flag lapsed', function () {
+    $app = app(ApplicationProvider::class)->findById('app-id');
+    $context = new PluginContext(app(ChannelManager::class));
+    $channelName = 'presence-room-'.uniqid();
+
+    $connection = new FakeConnection('sock-1', $app);
+    $channel = joinPresenceChannel($channelName, $connection, 'u-1');
+
+    $roster = new RedisRosterPlugin;
+    $webhooks = new WebhookPlugin;
+    $redis = $this->redis;
+
+    runLoop(function () use ($roster, $webhooks, $context, $channel, $connection, $redis, $channelName) {
+        $roster->boot($context);
+        $webhooks->boot($context);
+
+        $roster->onSubscribe($connection, $channel);
+        $webhooks->onSubscribe($connection, $channel);
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+
+        // Both flags lapse while the member stays on the channel.
+        $redis->del('wh-test:occ:app-id:'.$channelName);
+        $redis->del('wh-test:mem:app-id:'.$channelName.':u-1');
+
+        // Two reconcile passes: the first heals both edges, the second owes nothing.
+        ($webhooks->ticks()[1]['callback'])();
+        ($webhooks->ticks()[1]['callback'])();
+        ($webhooks->ticks()[0]['callback'])();
+        delay(0.05);
+    });
+
+    expect($this->transport->deliveries)->toHaveCount(2);
+
+    $healed = json_decode($this->transport->deliveries[1]['body'], associative: true);
+
+    expect(array_column($healed['events'], 'name'))->toBe(['channel_occupied', 'member_added'])
+        ->and($healed['events'][1]['user_id'])->toBe('u-1')
+        ->and($this->redis->exists('wh-test:mem:app-id:'.$channelName.':u-1'))->toBe(1);
+});

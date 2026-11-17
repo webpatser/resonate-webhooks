@@ -110,6 +110,9 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
             RosterKeys::fromConfig(config('resonate-roster', [])),
             $config['key_prefix'] ?? 'wh',
             (int) ($config['ttl'] ?? 90),
+            // A flag TTL at or below the reconcile interval is raised to two
+            // intervals, so flags survive between reconcile passes.
+            $this->reconcileInterval,
         );
 
         $this->dispatcher = new WebhookDispatcher(
@@ -356,13 +359,18 @@ class WebhookPlugin implements ConnectionLifecycle, MessageInterceptor, ServerPl
 
         // Member flags carry the same TTL as the occupied flag, so they are
         // refreshed on the same tick; otherwise a member who stays longer than
-        // the TTL leaves without a member_removed edge.
-        $this->occupancy?->refreshMembers($appId, $name, $state['users']);
+        // the TTL leaves without a member_removed edge. A flag that had lapsed
+        // is re-claimed with its member_added edge rather than healed silently.
+        $healed = $this->occupancy?->refreshMembers($appId, $name, $state['users']) ?? [];
 
         if ($edge === 'occupied') {
             $this->dispatcher?->record(WebhookEvent::channelOccupied($appId, $name));
         } elseif ($edge === 'vacated') {
             $this->dispatcher?->record(WebhookEvent::channelVacated($appId, $name));
+        }
+
+        foreach ($healed as $userId) {
+            $this->dispatcher?->record(WebhookEvent::memberAdded($appId, $name, $userId));
         }
 
         if ($this->context->connectionsOn($appId, $name) === []) {

@@ -6,14 +6,16 @@ use Fledge\Async\Redis\RedisClient;
 use Webpatser\ResonateRoster\RosterKeys;
 
 /**
- * Turns the roster's cluster-wide state into exactly-once occupancy edges.
+ * Turns the roster's cluster-wide state into cluster-wide occupancy edges.
  *
  * The roster ({@see https://github.com/webpatser/resonate-roster}) keeps a
  * self-healing, per-node count of who is on each channel of each application.
  * This tracker reads that count over the async Redis client and claims each
  * edge with a small atomic flag key, so `channel_occupied`, `channel_vacated`,
- * `member_added`, and `member_removed` each fire once per cluster, not once
- * per node.
+ * `member_added`, and `member_removed` are each claimed once per cluster, not
+ * once per node. `member_added` is delivered at least once: a member flag that
+ * lapsed while its member stayed is re-claimed by the reconcile pass, with a
+ * fresh `member_added` edge.
  *
  * Every read and every flag is scoped to one application: two applications
  * that both serve a "presence-lobby" get their own occupancy edges, instead of
@@ -26,14 +28,29 @@ class OccupancyTracker
      * @param  RosterKeys  $rosterKeys  The roster's key schema, built from the roster's own config.
      * @param  string  $prefix  Namespace for this plugin's flag keys.
      * @param  int  $ttl  Flag-key TTL in seconds, so a dead node's flag self-heals.
+     * @param  float  $reconcileInterval  Seconds between reconcile passes; the
+     *                                    effective TTL is at least twice this.
      */
     public function __construct(
         protected RedisClient $redis,
         protected RosterKeys $rosterKeys,
         protected string $prefix,
         protected int $ttl,
+        float $reconcileInterval = 0.0,
     ) {
-        //
+        // The reconcile pass is what keeps a flag alive, so a TTL at or below
+        // its interval would let every flag lapse between two passes: a roster
+        // read and a duplicate `member_added` per member per tick. Raise a TTL
+        // that is too short to two intervals instead of rejecting the config.
+        $this->ttl = max($ttl, (int) ceil($reconcileInterval * 2));
+    }
+
+    /**
+     * The flag-key TTL in seconds actually applied.
+     */
+    public function ttl(): int
+    {
+        return $this->ttl;
     }
 
     /**
@@ -211,17 +228,52 @@ class OccupancyTracker
      * reconcile pass calls this with each channel's roster slice, so a flag
      * lives exactly as long as its member is present.
      *
-     * A flag that already lapsed is re-claimed silently: the member is present,
-     * so no `member_added` edge is owed; the flag only has to exist again for
-     * the departure to be claimed.
+     * Only a flag that still exists is refreshed: EXPIRE is a no-op on a
+     * missing key, so the existence check and the TTL refresh are one atomic
+     * command and a refresh can never re-create a flag on its own.
      *
-     * @param  list<string>  $users  Presence user ids currently in the roster.
+     * A missing flag is never healed silently. Either it lapsed while the
+     * member stayed, or a `member_removed` claim deleted it after `$users` was
+     * read. Both go through {@see claimMemberAdded()} against a fresh roster
+     * read, not the possibly stale `$users`: a member who really left stays
+     * unflagged, and a member who is still present is re-claimed and owed a
+     * `member_added` edge. A lapsed flag can therefore yield a duplicate
+     * `member_added`, never a lost one.
+     *
+     * A member can also leave between that fresh read and the flag write:
+     * their `member_removed` claim then found no flag to delete, and the flag
+     * written here would outlive them with nothing left to remove it. So the
+     * roster is read once more after the claim wins; a member gone by then has
+     * the flag dropped again and is owed no edge.
+     *
+     * @param  list<string>  $users  Presence user ids in the caller's roster snapshot.
+     * @return list<string> User ids whose flag was re-claimed: emit `member_added` for each.
      */
-    public function refreshMembers(string $appId, string $channel, array $users): void
+    public function refreshMembers(string $appId, string $channel, array $users): array
     {
+        $added = [];
+
         foreach ($users as $userId) {
-            $this->claimFlag($this->flag('mem', $appId, $channel.':'.$userId));
+            $key = $this->flag('mem', $appId, $channel.':'.$userId);
+
+            if ($this->redis->expireIn($key, $this->ttl)) {
+                continue;
+            }
+
+            if (! $this->claimMemberAdded($appId, $channel, $userId)) {
+                continue;
+            }
+
+            if (! in_array($userId, $this->users($appId, $channel), true)) {
+                $this->releaseFlag($key);
+
+                continue;
+            }
+
+            $added[] = $userId;
         }
+
+        return $added;
     }
 
     /**

@@ -62,14 +62,44 @@ function scansDuring(Client $redis, Closure $body): int
     return scanCommandCount($redis);
 }
 
-function makeTracker(int $ttl = 90, ?RosterKeys $rosterKeys = null): OccupancyTracker
+function makeTracker(int $ttl = 90, ?RosterKeys $rosterKeys = null, float $reconcileInterval = 0.0): OccupancyTracker
 {
     return new OccupancyTracker(
         createRedisClient(RedisConfig::fromUri('redis://127.0.0.1:6379/15')),
         $rosterKeys ?? RosterKeys::fromConfig(config('resonate-roster')),
         'wh-test',
         $ttl,
+        $reconcileInterval,
     );
+}
+
+/**
+ * An indexed roster key schema that runs a callback on every index read.
+ *
+ * Each roster read through the node index asks for the index key exactly once,
+ * so the callback sees the reads in order and can change the roster between
+ * two of them, which is how a member leaving mid-heal is staged.
+ */
+function rosterKeysObservingIndexReads(Closure $onRead): RosterKeys
+{
+    $prefix = RosterKeys::fromConfig(config('resonate-roster'))->prefix();
+
+    return new class($prefix, $onRead) extends RosterKeys
+    {
+        protected int $reads = 0;
+
+        public function __construct(string $prefix, protected Closure $onRead)
+        {
+            parent::__construct($prefix);
+        }
+
+        public function nodeIndexKey(string $appId, string $channel): string
+        {
+            ($this->onRead)(++$this->reads);
+
+            return $this->prefix.'-nodes:'.$appId.':'.$channel;
+        }
+    };
 }
 
 /**
@@ -317,20 +347,30 @@ it('keeps a member flag armed past the ttl while the member stays', function () 
         ->and($removed)->toBeTrue();
 });
 
-it('silently heals a lapsed member flag while the member is present', function () {
+it('re-claims a lapsed member flag with exactly one member_added per heal', function () {
     // The member is present but their flag has already expired.
     $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
 
+    $healed = [];
     $added = null;
 
-    runLoop(function () use (&$added) {
+    runLoop(function () use (&$healed, &$added) {
         $tracker = makeTracker(2);
-        $tracker->refreshMembers('app-id', 'presence-room', ['u-7']);
-        // The flag is back, so no second member_added edge is claimed.
+        // The first refresh finds no flag and owes the member_added edge.
+        $healed[] = $tracker->refreshMembers('app-id', 'presence-room', ['u-7']);
+        // The flag is back, so later refreshes and claims owe nothing.
+        $healed[] = $tracker->refreshMembers('app-id', 'presence-room', ['u-7']);
         $added = $tracker->claimMemberAdded('app-id', 'presence-room', 'u-7');
     });
 
     $ttl = $this->redis->ttl('wh-test:mem:app-id:presence-room:u-7');
+
+    // The flag lapses again while the member stays: a second heal, a second edge.
+    $this->redis->del('wh-test:mem:app-id:presence-room:u-7');
+
+    runLoop(function () use (&$healed) {
+        $healed[] = makeTracker(2)->refreshMembers('app-id', 'presence-room', ['u-7']);
+    });
 
     $this->redis->del('roster-test:app-id:presence-room:node-a');
 
@@ -340,9 +380,90 @@ it('silently heals a lapsed member flag while the member is present', function (
         $removed = makeTracker(2)->claimMemberRemoved('app-id', 'presence-room', 'u-7');
     });
 
-    expect($added)->toBeFalse()
+    expect($healed)->toBe([['u-7'], [], ['u-7']])
+        ->and($added)->toBeFalse()
         ->and($ttl)->toBeGreaterThan(0)->toBeLessThanOrEqual(2)
         ->and($removed)->toBeTrue();
+});
+
+it('does not restore a member flag from a stale snapshot after member_removed', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
+
+    $added = null;
+
+    runLoop(function () use (&$added) {
+        $added = makeTracker()->claimMemberAdded('app-id', 'presence-room', 'u-7');
+    });
+
+    // The reconcile pass reads its snapshot while the member is still there.
+    $stale = ['u-7'];
+
+    // Before the pass refreshes, the member leaves and member_removed fires.
+    $this->redis->del('roster-test:app-id:presence-room:node-a');
+
+    $removed = null;
+    $healed = null;
+
+    runLoop(function () use (&$removed, &$healed, $stale) {
+        $tracker = makeTracker();
+        $removed = $tracker->claimMemberRemoved('app-id', 'presence-room', 'u-7');
+        $healed = $tracker->refreshMembers('app-id', 'presence-room', $stale);
+    });
+
+    expect($added)->toBeTrue()
+        ->and($removed)->toBeTrue()
+        ->and($healed)->toBe([])
+        ->and($this->redis->exists('wh-test:mem:app-id:presence-room:u-7'))->toBe(0);
+});
+
+it('drops a healed member flag when the member left before the re-read', function () {
+    // The member is present and their flag has lapsed.
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
+    $this->redis->sadd('roster-test-nodes:app-id:presence-room', ['node-a']);
+
+    $redis = $this->redis;
+    $removedDuringHeal = null;
+    $healed = null;
+
+    // Read 1 is the claim's fresh roster read, which still sees the member.
+    // Before read 2, after the claim wrote the flag, the member leaves: their
+    // member_removed claim ran before the flag existed and found nothing.
+    $rosterKeys = rosterKeysObservingIndexReads(function (int $read) use ($redis, &$removedDuringHeal) {
+        if ($read === 2) {
+            $removedDuringHeal = $redis->exists('wh-test:mem:app-id:presence-room:u-7') === 1;
+            $redis->del('roster-test:app-id:presence-room:node-a');
+            $redis->del('roster-test-nodes:app-id:presence-room');
+        }
+    });
+
+    runLoop(function () use (&$healed, $rosterKeys) {
+        $healed = makeTracker(rosterKeys: $rosterKeys)->refreshMembers('app-id', 'presence-room', ['u-7']);
+    });
+
+    expect($removedDuringHeal)->toBeTrue()
+        ->and($healed)->toBe([])
+        ->and($this->redis->exists('wh-test:mem:app-id:presence-room:u-7'))->toBe(0);
+});
+
+it('raises a flag ttl at or below the reconcile interval to two intervals', function () {
+    $this->redis->hset('roster-test:app-id:presence-room:node-a', 'sock-1', 'u-7');
+
+    $ttls = [];
+
+    runLoop(function () use (&$ttls) {
+        $short = makeTracker(10, reconcileInterval: 30.0);
+        $long = makeTracker(90, reconcileInterval: 30.0);
+
+        $ttls['short'] = $short->ttl();
+        $ttls['long'] = $long->ttl();
+
+        $short->claimMemberAdded('app-id', 'presence-room', 'u-7');
+    });
+
+    $flagTtl = $this->redis->ttl('wh-test:mem:app-id:presence-room:u-7');
+
+    expect($ttls)->toBe(['short' => 60, 'long' => 90])
+        ->and($flagTtl)->toBeGreaterThan(30)->toBeLessThanOrEqual(60);
 });
 
 it('reconciles a missed occupied edge against the roster', function () {
