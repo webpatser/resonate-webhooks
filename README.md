@@ -11,7 +11,7 @@ Two things make naive webhooks wrong on a scaled cluster:
 1. **Occupancy is per node.** Resonate's `ChannelCreated`/`ChannelRemoved` events fire on each node independently. Firing `channel_occupied` from them double-sends it when a channel has subscribers on two nodes, and fires `channel_vacated` from one node while another still holds subscribers.
 2. **Presence is per node.** The same user can be present on two nodes; a node firing `member_removed` for its own last connection is wrong if the user is still on another node.
 
-This package fixes both by reading occupancy from [webpatser/resonate-roster](https://github.com/webpatser/resonate-roster), which keeps a cluster-wide, self-healing membership count, and claiming each edge exactly once per cluster.
+This package fixes both by reading occupancy from [webpatser/resonate-roster](https://github.com/webpatser/resonate-roster), which keeps a cluster-wide, self-healing membership count, and claiming each edge once per cluster, with `member_added` delivered at least once.
 
 ## How it works
 
@@ -24,7 +24,9 @@ The roster answers "how many connections does channel C have" and "which users a
 - `member_added` and `member_removed` use the same claim, keyed per user, driven by whether the user still appears in the roster.
 - A reconcile tick re-checks every tracked channel against the roster, so an edge missed during a crash is recovered and flag TTLs are refreshed.
 
-Because the flag is the arbiter, each edge fires exactly once per cluster even when several nodes see the transition at the same instant.
+Because the flag is the arbiter, each channel and presence edge is claimed once per cluster even when several nodes see the transition at the same instant.
+
+One caveat on member events: each reconcile tick refreshes the TTL only on member flags that still exist, so a refresh never creates a flag. A flag that is missing goes through the same `member_added` claim against a fresh roster read. A member who is still present gets the flag back and a `member_added` webhook, so after a lapse your backend may receive a duplicate `member_added` for that user but never loses one; treat `member_added` as idempotent. A member who already left (their flag was deleted by `member_removed`) stays unflagged and gets no event.
 
 Every read and every flag is scoped to one application, so two applications that both serve a `presence-lobby` get their own edges: the second one to fill up still emits its own `channel_occupied`, and the first one emptying does not vacate the second.
 
@@ -133,7 +135,7 @@ abort_unless(hash_equals($expected, $request->header('X-Pusher-Signature')), 403
 |-----|---------|---------|
 | `connection` | `REDIS_*` env | Redis server. Must be the same server and database as resonate-roster. Takes Laravel's connection keys, `scheme` (`tcp`, `tls`/`rediss`, `unix`), `read_timeout` and the retry keys included. |
 | `key_prefix` | `wh` | Namespace for the edge-detection flag keys, which are `{prefix}:{kind}:{appId}:{channel}`. |
-| `ttl` | `90` | Flag-key TTL in seconds, so a dead node's flag self-heals. |
+| `ttl` | `90` | Flag-key TTL in seconds, so a dead node's flag self-heals. The reconcile pass keeps flags alive, so the TTL must exceed `reconcile_interval`; a value below twice `reconcile_interval` is raised to twice `reconcile_interval`. |
 | `flush_interval` | `1.0` | Seconds between delivery ticks; events in that window are coalesced. |
 | `reconcile_interval` | `30.0` | Seconds between occupancy reconcile ticks. |
 | `ignore_channel_prefixes` | `['#']` | Channel prefixes never reported on. The protocol reserves `#` for channels the server owns, such as the `#server-to-user-{id}` channels `webpatser/resonate-users` creates, which are a user's session rather than a room. |
