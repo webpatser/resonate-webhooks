@@ -62,6 +62,39 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Limits
+    |--------------------------------------------------------------------------
+    |
+    | Bounds that keep a slow or unreachable endpoint from growing memory
+    | without limit. Set any of them to 0 to make it unbounded.
+    |
+    | max_buffered_events: events held between drain ticks. When full, a
+    |   buffered occupied/vacated or added/removed pair is cancelled first
+    |   (nothing lost), then the oldest client_event is dropped, then the
+    |   oldest event. That last step loses an occupancy or presence edge; the
+    |   warning logged on the next drain says so, and receivers need a resync.
+    | max_pending_deliveries: built deliveries awaiting or retrying. When full,
+    |   the oldest delivery not in flight is dropped and WebhookDropped fires
+    |   with reason "pending limit reached". A delivery still waiting for an
+    |   in-flight slot or for its previous chunk counts as not in flight, so
+    |   it can be dropped with 0 attempts.
+    | max_request_bytes: a larger batch for one endpoint and app is split over
+    |   several signed POSTs, sent strictly one after the other.
+    | max_in_flight_per_endpoint: concurrent POSTs to one endpoint URL; the
+    |   rest wait for a later drain tick.
+    |
+    */
+
+    'max_buffered_events' => (int) env('RESONATE_WEBHOOKS_MAX_BUFFERED_EVENTS', 10000),
+
+    'max_pending_deliveries' => (int) env('RESONATE_WEBHOOKS_MAX_PENDING', 1000),
+
+    'max_request_bytes' => (int) env('RESONATE_WEBHOOKS_MAX_REQUEST_BYTES', 1048576),
+
+    'max_in_flight_per_endpoint' => (int) env('RESONATE_WEBHOOKS_MAX_IN_FLIGHT', 16),
+
+    /*
+    |--------------------------------------------------------------------------
     | Endpoints
     |--------------------------------------------------------------------------
     |
