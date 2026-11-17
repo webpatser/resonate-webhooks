@@ -22,10 +22,19 @@ final class HttpWebhookTransport implements WebhookTransport
 
     /**
      * Create a new transport, building a default client when none is given.
+     *
+     * The default client never follows redirects. Following one would turn a
+     * 301/302 POST into a bodyless GET whose 2xx then counts as delivered,
+     * while the endpoint never received the signed payload. Returning the 3xx
+     * status instead makes the dispatcher treat it as a failed attempt, the
+     * way Pusher's own webhook sender does.
+     *
+     * A client passed in keeps its own redirect setting: it is used as given,
+     * so a client built with redirects on still follows them.
      */
     public function __construct(?HttpClient $client = null)
     {
-        $this->client = $client ?? HttpClientBuilder::buildDefault();
+        $this->client = $client ?? (new HttpClientBuilder)->followRedirects(0)->build();
     }
 
     /**
