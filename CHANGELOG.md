@@ -5,7 +5,7 @@ All notable changes to `webpatser/resonate-webhooks` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-18
 
 ### Security
 
@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Member flags are re-armed on every reconcile pass and lapsed flags heal silently, so `member_removed` is sent for sessions longer than the flag TTL.
+- Member flags are re-armed on every reconcile pass, so `member_removed` is sent for sessions longer than the flag TTL.
+- A member whose flag has lapsed is claimed again against a fresh roster read and reported with `member_added`; a lapse can send a duplicate `member_added` but never loses one, and a member who already left stays unflagged.
 
 ### Changed
 
